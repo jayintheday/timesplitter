@@ -284,37 +284,82 @@ generic and data-driven — do not change the token config, the component defini
 CDN-offline note: if the user needs a file that works without internet, that's the "real shadcn
 project" path, not this one — keep this template's CDN model unless they ask otherwise.
 
+#### Definitive shadcn/ui setup — DO NOT DEVIATE
+The template below is the shadcn/ui setup that renders correctly as a single file. Every item is
+load-bearing; the most common "looks almost-but-not shadcn / renders broken" failures map 1:1 to
+skipping one of these. Emit the template **verbatim** (only the 5 tokens change) — do not "simplify"
+the head.
+
+1. **Tailwind = v3 Play CDN, pinned:** `https://cdn.tailwindcss.com/3.4.17`. The Play CDN serves
+   Tailwind **v3**, where the global `tailwind.config` object wires the tokens. Do **NOT** swap in
+   `@tailwindcss/browser` (v4) — v4 ignores `tailwind.config` (CSS-first `@theme`) and the tokens
+   silently stop generating, so `bg-card`/`border-border` produce nothing.
+2. **Tokens as HSL triplets** in a plain `<style>` `:root`/`.dark` (e.g. `--background:0 0% 100%`).
+   They MUST be HSL triplets because the config maps colors as `hsl(var(--token))`. Do not paste the
+   newer oklch values from ui.shadcn.com here — they'd be double-wrapped in `hsl()` and break.
+3. **The shadcn base layer is mandatory** — a `<style type="text/tailwindcss">` block with
+   `@layer base{ *{ @apply border-border; } body{ @apply bg-background text-foreground; } }`.
+   This is what shadcn ships in `globals.css`; without it every border falls back to Tailwind's
+   default gray (not the theme token) and the body isn't token-driven. Omitting it is the #1 reason
+   it looks "off."
+4. **Dark mode is class-based** (`darkMode:['class']`), default **light**. Do **NOT** use
+   `@media (prefers-color-scheme:dark)` — that makes the file render dark on a dark-mode OS, which
+   reads as "broken." (Add a `dark` class on `<html>` only if a dark dashboard is explicitly wanted.)
+5. **Recharts load order + deps:** `react` → `react-dom` → `prop-types` → `react-is` → `recharts` →
+   `@babel/standalone`, all **pinned, via jsdelivr** (unpkg 404s on the recharts UMD path). Recharts'
+   UMD externalizes `prop-types` AND `react-is`; if either global is missing the UMD factory throws
+   and `window.Recharts` is `undefined` (chart + whole app fail to mount). No `crossorigin` attribute
+   (it triggers CORS failures on CDN redirects from `file://`).
+6. **Font:** Inter via Google Fonts, `font-sans`+`antialiased` on `<body>`.
+7. **Verify in a browser before declaring done** (Step 5): no console errors, `window.Recharts` is an
+   object, `getComputedStyle(body).backgroundColor` is white, and a `.bg-card` border-color equals the
+   token (`rgb(228, 228, 231)`), not gray-200 (`rgb(229, 231, 235)`).
+
 #### HTML template (verbatim except the 5 tokens)
 ````html
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{{TITLE}}</title>
-<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <script>
 tailwind.config={darkMode:['class'],theme:{extend:{
+ fontFamily:{sans:['Inter','ui-sans-serif','system-ui','-apple-system','Segoe UI','Roboto','Helvetica','Arial','sans-serif']},
  colors:{border:'hsl(var(--border))',input:'hsl(var(--input))',ring:'hsl(var(--ring))',
   background:'hsl(var(--background))',foreground:'hsl(var(--foreground))',
   primary:{DEFAULT:'hsl(var(--primary))',foreground:'hsl(var(--primary-foreground))'},
   secondary:{DEFAULT:'hsl(var(--secondary))',foreground:'hsl(var(--secondary-foreground))'},
   muted:{DEFAULT:'hsl(var(--muted))',foreground:'hsl(var(--muted-foreground))'},
   accent:{DEFAULT:'hsl(var(--accent))',foreground:'hsl(var(--accent-foreground))'},
-  card:{DEFAULT:'hsl(var(--card))',foreground:'hsl(var(--card-foreground))'},
   destructive:{DEFAULT:'hsl(var(--destructive))',foreground:'hsl(var(--destructive-foreground))'},
-  'chart-1':'hsl(var(--chart-1))','chart-2':'hsl(var(--chart-2))'},
+  popover:{DEFAULT:'hsl(var(--popover))',foreground:'hsl(var(--popover-foreground))'},
+  card:{DEFAULT:'hsl(var(--card))',foreground:'hsl(var(--card-foreground))'},
+  'chart-1':'hsl(var(--chart-1))','chart-2':'hsl(var(--chart-2))','chart-3':'hsl(var(--chart-3))',
+  'chart-4':'hsl(var(--chart-4))','chart-5':'hsl(var(--chart-5))'},
  borderRadius:{lg:'var(--radius)',md:'calc(var(--radius) - 2px)',sm:'calc(var(--radius) - 4px)'}}}}
 </script>
 <style>
+/* shadcn/ui default theme tokens (HSL triplets, for Tailwind v3 hsl(var(--x)) mapping) */
 :root{--background:0 0% 100%;--foreground:240 10% 3.9%;--card:0 0% 100%;--card-foreground:240 10% 3.9%;
  --popover:0 0% 100%;--popover-foreground:240 10% 3.9%;--primary:240 5.9% 10%;--primary-foreground:0 0% 98%;
  --secondary:240 4.8% 95.9%;--secondary-foreground:240 5.9% 10%;--muted:240 4.8% 95.9%;--muted-foreground:240 3.8% 46.1%;
  --accent:240 4.8% 95.9%;--accent-foreground:240 5.9% 10%;--destructive:0 84.2% 60.2%;--destructive-foreground:0 0% 98%;
- --border:240 5.9% 90%;--input:240 5.9% 90%;--ring:240 10% 3.9%;--radius:0.5rem;
- --chart-1:221.2 83.2% 53.3%;--chart-2:212 95% 68%;}
-@media (prefers-color-scheme:dark){:root{--background:240 10% 3.9%;--foreground:0 0% 98%;--card:240 10% 3.9%;
- --card-foreground:0 0% 98%;--popover:240 10% 3.9%;--popover-foreground:0 0% 98%;--primary:0 0% 98%;--primary-foreground:240 5.9% 10%;
+ --border:240 5.9% 90%;--input:240 5.9% 90%;--ring:240 5.9% 10%;--radius:0.5rem;
+ --chart-1:221.2 83.2% 53.3%;--chart-2:212 95% 68%;--chart-3:216 92% 60%;--chart-4:210 98% 78%;--chart-5:212 97% 87%;}
+.dark{--background:240 10% 3.9%;--foreground:0 0% 98%;--card:240 10% 3.9%;--card-foreground:0 0% 98%;
+ --popover:240 10% 3.9%;--popover-foreground:0 0% 98%;--primary:0 0% 98%;--primary-foreground:240 5.9% 10%;
  --secondary:240 3.7% 15.9%;--secondary-foreground:0 0% 98%;--muted:240 3.7% 15.9%;--muted-foreground:240 5% 64.9%;
  --accent:240 3.7% 15.9%;--accent-foreground:0 0% 98%;--destructive:0 62.8% 30.6%;--destructive-foreground:0 0% 98%;
- --border:240 3.7% 15.9%;--input:240 3.7% 15.9%;--ring:240 4.9% 83.9%;--chart-1:217.2 91.2% 59.8%;--chart-2:212 95% 68%;}}
-body{background:hsl(var(--background));color:hsl(var(--foreground))}
+ --border:240 3.7% 15.9%;--input:240 3.7% 15.9%;--ring:240 4.9% 83.9%;
+ --chart-1:221.2 83.2% 53.3%;--chart-2:212 95% 68%;--chart-3:216 92% 60%;--chart-4:210 98% 78%;--chart-5:212 97% 87%;}
+</style>
+<style type="text/tailwindcss">
+/* shadcn/ui base layer — makes every border + the body use the theme tokens */
+@layer base{
+  *{ @apply border-border; }
+  body{ @apply bg-background text-foreground; }
+}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
@@ -323,7 +368,7 @@ body{background:hsl(var(--background));color:hsl(var(--foreground))}
 <script src="https://cdn.jsdelivr.net/npm/recharts@2.15.4/umd/Recharts.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.4/babel.min.js"></script>
 </head>
-<body class="min-h-screen antialiased">
+<body class="min-h-screen font-sans antialiased">
 <div id="root" data-title="{{HEADING}}" data-range="{{DATE_RANGE}}" data-foot="{{FOOTNOTE}}"></div>
 <script>const DATA=__DATA_JSON__;</script>
 <script type="text/babel" data-presets="react">
@@ -432,8 +477,16 @@ ReactDOM.createRoot(_root).render(<App/>);
 - The deduped commit total in the `.md` Summary matches
   `git -C <clone> log --all --since --until --author=<email> --pretty=%H` unioned across clones and `sort -u | wc -l`.
 - `.md`, `.csv`, `.html` agree on per-day commits/hours/sessions.
-- Open the `.html` mentally: `DATA` is valid JSON, KPIs sum correctly, off days render as flat grey bars.
-- Report the three output paths and the headline KPIs to the user.
+- `DATA` is valid JSON; no leftover `{{…}}`/`__DATA_JSON__` tokens remain in the `.html`.
+- **Render-verify the dashboard in a real browser** (the file uses runtime React/Tailwind/Recharts,
+  so static inspection is not enough). Load it headless (e.g. gstack `/browse`: `goto file://…`) and
+  confirm: no console errors; `typeof window.Recharts === 'object'`; an `h1` exists; KPI numbers sum
+  correctly; `getComputedStyle(document.body).backgroundColor` is white (light default); a `.bg-card`
+  border-color is the token `rgb(228, 228, 231)` (proves the base layer applied, not gray-200); the
+  chart has one bar per day and the table has one row per day. If the page is unstyled or the chart is
+  missing, the CDN scripts were blocked — say so rather than shipping a broken file.
+- Report the three output paths and the headline KPIs to the user, and note the file needs internet
+  on first open (CDN scripts).
 
 ## Notes & gotchas
 - **Order matters**: write `.md` → `.csv` → `.html`. Never emit the HTML before the markdown exists.
