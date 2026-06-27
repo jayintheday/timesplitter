@@ -26,7 +26,9 @@ evidence, then produce three internally-consistent files:
 
 Evidence sources: **git commits + reflog** across all clones/worktrees, **Claude Code + Codex
 session logs**, **GitHub PRs** (`gh`), and **Linear issue lifecycle** (MCP). Hours are
-*activity-based estimates*, not stopwatch time.
+*activity-based estimates*, not stopwatch time. **Only git is required** — PRs, agent sessions, and
+Linear are each optional and skipped cleanly when a project doesn't use them (Linear is auto-detected;
+see Step 2f). The outputs list only the sources that actually contributed.
 
 **One evolving timesheet, brought up to date on every run.** The first run is a full reconstruction
 over the range; it also writes a hidden **state file** (the durable per-day dataset). Every later run
@@ -61,6 +63,7 @@ plan (range / repos / output paths), then **generate without pausing**.
 | `--tz` | `Europe/London` |
 | `--full` | ignore any saved state and rebuild the whole range from scratch |
 | `--since YYYY-MM-DD` | widen the incremental recompute window back to this date (refresh older days) |
+| `--no-linear` / `--linear` | force Linear off / on (default: auto-detect from the project's ticket refs — see Step 2f) |
 
 A `2026-05-15..2026-06-26` positional form is also accepted as `--from..--to`.
 
@@ -215,26 +218,55 @@ span is a real interval `[start,end]`.
 Glob `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. First line is `type:session_meta` with
 `payload.cwd` and `payload.git`. Span = min/max top-level `timestamp`. Attribute via `payload.cwd`.
 
-### 2e. GitHub PRs
+### 2e. GitHub PRs (optional — skip cleanly if absent)
 ```bash
 gh search prs --author=@me --created=<from>..<to> \
   --json number,title,createdAt,closedAt,state,repository --limit 1000
 ```
-- `prs_opened` per day = bucket `createdAt`.
-- `prs_merged` per day = rows with `state=="merged"`, bucketed by `closedAt` (= merge time).
-- For wide ranges, split the window if you approach the 1000-row cap.
+- **Scope to this project's repos:** keep only rows whose `repository.nameWithOwner` matches one of the
+  resolved clones' remotes (Step 1). `gh search` returns PRs across *all* your repos, so this is what
+  keeps another project's PRs out.
+- `prs_opened` per day = bucket `createdAt`; `prs_merged` = rows with `state=="merged"` bucketed by
+  `closedAt`. Wide range → split the window near the 1000-row cap.
+- If `gh` is not installed/authed, or the project has no PRs → all PR counts are 0. **Not an error** —
+  treat GitHub as an absent source (see "Optional sources" below).
 
-### 2f. Linear (MCP)
-- Resolve the user: `mcp__linear__list_users` / `mcp__linear__get_user` (match the `--author` email).
-- `mcp__linear__list_issues` filtered by assignee = the user and `updatedAt` within range (paginate).
-  Optionally `mcp__linear__list_comments` on candidate issues for finer per-day events.
-- `linear` (per day) = count of user-attributable issue updates/comments that day.
-- Collect Linear issue **identifiers** touched each day to augment tickets.
+### 2f. Linear (MCP) — optional, auto-detected, project-scoped
+Linear is **workspace-wide**, so for a project that doesn't use Linear it would inject unrelated
+noise. Decide whether Linear applies, per run:
+
+1. **`--no-linear`** → skip entirely.
+2. **`--linear`** → force-enable.
+3. **Default = auto-detect.** Compute the project's **ticket prefixes** = the set of `[A-Z]{2,}`
+   prefixes from `[A-Z]{2,}-\d+` matches in commit subjects + branch names within the range (Step 2g).
+   - **No ticket refs at all → treat the project as non-Linear: skip the Linear query** (also a real
+     speed win — no MCP round-trips).
+   - **Ticket refs found → query Linear, scoped to those prefixes:** `mcp__linear__list_users` to
+     resolve the `--author` user, then `mcp__linear__list_issues` (assignee = user, `updatedAt` within
+     window, paginate) and **keep only issues whose identifier prefix is in the project's prefix set**.
+     `linear` (per day) = count of those issues' lifecycle stamps (created/started/completed/canceled)
+     that fall on the day; collect their identifiers to augment tickets.
+
+When Linear is skipped or returns nothing, every day's `linear` = 0 and Linear is recorded as an
+**absent source** (don't flip off-days to active on Linear, and don't list it as evidence — see below).
 
 ### 2g. Tickets
 Per day, tickets = sorted-unique union of:
-- regex `[A-Z]+-\d+` (e.g. `LIM-\d+`) found in commit subjects and branch names, **plus**
-- Linear identifiers touched that day.
+- regex `[A-Z]{2,}-\d+` (e.g. `LIM-123`, `TWT-9`) found in commit subjects and branch names — this is
+  the **primary** source and works with any project's prefix, **plus**
+- Linear identifiers touched that day (only if Linear is active).
+
+### Optional sources — degrade, never fail
+Every source except git is **optional**. git commits (+ reflog) are the floor; a usable timesheet can
+be built from git + agent sessions alone. Track which sources actually contributed (`commits>0`,
+`claude+codex sessions>0`, `prs_opened+prs_merged>0`, `linear>0` across the range) and adapt the
+outputs to only what was present:
+- the `.md` **methodology line** lists only the evidence sources that contributed;
+- the `.md` **day headlines** omit a segment for any globally-absent source (e.g. drop `· N Linear`
+  when there is no Linear, drop `· NPR↑/NPR↓` when there are no PRs);
+- add a one-line **footnote** noting what was unavailable (e.g. "This project isn't tracked in Linear,
+  so estimates rest on git commits, agent sessions and PRs.").
+A missing/failed source is a warning, never an abort.
 
 ---
 
@@ -323,9 +355,11 @@ Render from the **full merged `records[]`** (not just the window). The covered r
 `(<from-pretty> – <now-pretty>)` is shown in the title/subtitle. Mirror the reference structure:
 
 - `# <Name> — daily work log (<from-pretty> – <to-pretty>)`
-- An italic methodology line: _Forensic reconstruction from this machine. Evidence: git commits +
-  HEAD reflog across <N clones + worktrees>, Claude Code + Codex session logs, GitHub PRs, Linear
-  issue lifecycle. All times local <tz abbrev>._
+- An italic methodology line listing **only the sources that contributed** (see Step 2 "Optional
+  sources"): _Forensic reconstruction from this machine. Evidence: git commits + HEAD reflog across
+  <N clones + worktrees>[, Claude Code + Codex session logs][, GitHub PRs][, Linear issue lifecycle].
+  All times local <tz abbrev>._ — drop the Linear clause for a non-Linear project, drop the PR clause
+  if there were no PRs, etc.
 - `## How to read this` — bullets defining **Span**, **Active** (90-min gap rule; sessions are real
   spans, point events padded ±10 min), and any data-quality caveat (e.g. periods with commits but no
   agent-session logs → commit count is the firmer signal, active hours undercount).
@@ -334,7 +368,7 @@ Render from the **full merged `records[]`** (not just the window). The covered r
   longest-active (top ~5); the explicit off-days list.
 - `### Weekly totals` — table: `| Week (Mon) | Active days | Commits | Active h | Span h | PRs merged |`.
 - `## Day by day` — grouped by `### Week of <Monday>`, each day:
-  - headline: `**<date> <Dow>** — <HH:MM>–<HH:MM>  ·  **<active>h active** (span <span>h, <n> blocks)  ·  <commits> commits · <sessions> sessions · <opened>PR↑/<merged>PR↓ · <linear> Linear` (append a small tag like `⚙️ manual/web`, `🗂 planning`, `🧪 WIP` where apt). Off days: `**<date> <Dow>** — _off (no activity logged)_`.
+  - headline: `**<date> <Dow>** — <HH:MM>–<HH:MM>  ·  **<active>h active** (span <span>h, <n> blocks)  ·  <commits> commits · <sessions> sessions · <opened>PR↑/<merged>PR↓ · <linear> Linear` (append a small tag like `⚙️ manual/web`, `🗂 planning`, `🧪 WIP` where apt). **Omit any segment whose source was globally absent** — e.g. no `· <linear> Linear` for a non-Linear project, no `· <opened>PR↑/<merged>PR↓` if there were no PRs. Off days: `**<date> <Dow>** — _off (no activity logged)_`.
   - `  - _Worked on:_ <commit subjects, truncated>`
   - `  - _Where:_ <repo labels>  ·  _Tickets:_ <ticket ids>` (omit empties)
   - padded block sub-lines: `    - <HH:MM>–<HH:MM> (<Hh MM>) — <n> commits[, <n> Claude][, <n> Codex]`
