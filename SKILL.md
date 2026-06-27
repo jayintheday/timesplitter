@@ -207,16 +207,18 @@ git -C <clonepath> reflog --all --date=iso
 ```
 Use entries in range as extra presence points. Reflog prunes after ~90 days, so treat as optional.
 
-### 2c. Claude Code sessions (real time spans)
+### 2c. Claude Code sessions (use per-message timestamps, NOT min/max)
 Glob `~/.claude/projects/*/*.jsonl`. Each line is JSON; lines carry a top-level `timestamp`
-(ISO-8601 UTC) and a top-level `cwd`. Per file: **session span = min/max `timestamp`** over lines
-that have one (skip header lines without a timestamp). Attribute the session to a repo by matching
-`cwd` against a discovered repo/worktree path. Count one session per file overlapping the day; the
-span is a real interval `[start,end]`.
+(ISO-8601 UTC) and a top-level `cwd`. Keep the file only if `cwd` contains a discovered repo/worktree
+path. **Collect that file's individual message timestamps as event points** — do **not** reduce it to
+a single `min→max` span. (Why: a session left open overnight or resumed across days would otherwise
+count idle/empty hours as active — see the gotcha below.) The session *count* for a day = number of
+session files that have ≥1 message that day (so a session worked across two days counts on both).
 
-### 2d. Codex sessions (real time spans)
+### 2d. Codex sessions (same — per-message timestamps)
 Glob `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. First line is `type:session_meta` with
-`payload.cwd` and `payload.git`. Span = min/max top-level `timestamp`. Attribute via `payload.cwd`.
+`payload.cwd` and `payload.git` (use `payload.cwd` to attribute). Collect each line's top-level
+`timestamp` as event points, same as Claude.
 
 ### 2e. GitHub PRs (optional — skip cleanly if absent)
 ```bash
@@ -289,29 +291,33 @@ dataset is the source for all three files.
   `Linear planning / ticket updates`. Off day → `off (no activity logged)`.
 
 ### Work-block / active-hours algorithm
-`GAP = 90 min`, `PAD = 10 min`, timezone = `--tz`.
+`GAP = 90 min`, `PAD = 10 min`, timezone = `--tz`. **Everything is a timestamped point** — each
+commit, each session message, each reflog/Linear stamp. Bucket each point by its **local calendar
+day**; pad ±10 min; **clip to that day's bounds**; merge with the 90-min gap rule. (There are no
+multi-hour "session spans" — a session contributes its real message timestamps, so idle gaps and
+day boundaries are handled automatically.)
 
 ```
 for each day in [from..to]:
-    events = sessions (real intervals [start,end])  +  points (commits/reflog/linear at time t)
-    if events empty:
+    points = [ local timestamp of every commit, session message, reflog/Linear stamp on this day ]
+    if points empty:
         emit {off:true, start:null, end:null, hours:0.0, span_hours:0.0, session_blocks:0, …zeros}
         continue
 
-    # SPAN — the "Worked" window, from UNPADDED bounds
-    span_start = min(start of each session, t of each point)
-    span_end   = max(end   of each session, t of each point)
-    span_hours = round((span_end - span_start) in hours, 2)   # may be 0.0 for a lone point
+    day0 = start of this local day;  day1 = day0 + 24h
 
-    # ACTIVE — merge PADDED intervals
-    intervals = [ [s,e] for sessions ] + [ [t-PAD, t+PAD] for points ]
-    sort intervals by start
+    # SPAN — the "Worked" window, from the unpadded points (already within the day)
+    span_start = min(points);  span_end = max(points)
+    span_hours = round((span_end - span_start) in hours, 2)   # 0.0 for a lone point
+
+    # ACTIVE — pad each point ±10 min, CLIP to [day0, day1], merge with the gap rule
+    intervals = sorted( [ max(p-PAD, day0), min(p+PAD, day1) ] for p in points )
     blocks = []; cur = intervals[0]
     for iv in intervals[1:]:
         if iv.start - cur.end <= GAP: cur.end = max(cur.end, iv.end)   # same block
         else: blocks.push(cur); cur = iv                              # gap > 90m → new block
     blocks.push(cur)
-    hours = round(sum(b.end-b.start for b in blocks) in hours, 1)
+    hours = round(sum(b.end-b.start for b in blocks) in hours, 1)      # ≤ 24 by construction
     session_blocks = len(blocks)
 
     start = decimal_hours(span_start)   # local H + minutes/60  → 18:26 = 18.434
@@ -319,10 +325,12 @@ for each day in [from..to]:
     emit {off:false, start, end, span_hours, hours, session_blocks, …counts, repos, tickets, what}
 ```
 
-**Validation anchors** (reference run, 2026-05-15 → 2026-06-26): total deduped commits = **261**;
-2026-05-18 (lone Linear point) → `start==end==13.502`, span `0.0h`, active `0.33h`; 2026-05-15
-(commit 18:26) → padded block `18:16–18:36`; busiest 2026-06-22 → `13.8h`, 44 commits, 16 sessions,
-22 PRs merged. If your numbers diverge wildly, recheck `--all`, the author filter, and tz handling.
+**Validation anchors** (reference run, 2026-05-15 → 2026-06-26). Counts are model-independent —
+match them exactly: total deduped commits = **261**; busiest by commits 2026-06-22 = **44 commits,
+16 sessions, 22 PRs merged**; 2026-05-15 commit at 18:26 → padded block `18:16–18:36`. **No day may
+exceed 24h active** (if one does, sessions aren't being clipped/point-modelled — see Step 2c). Active
+*hours* depend on the point model, so treat them as ballpark, not exact. If counts diverge, recheck
+`--all`, the author filter, and tz handling.
 
 ---
 
@@ -360,9 +368,10 @@ Render from the **full merged `records[]`** (not just the window). The covered r
   <N clones + worktrees>[, Claude Code + Codex session logs][, GitHub PRs][, Linear issue lifecycle].
   All times local <tz abbrev>._ — drop the Linear clause for a non-Linear project, drop the PR clause
   if there were no PRs, etc.
-- `## How to read this` — bullets defining **Span**, **Active** (90-min gap rule; sessions are real
-  spans, point events padded ±10 min), and any data-quality caveat (e.g. periods with commits but no
-  agent-session logs → commit count is the firmer signal, active hours undercount).
+- `## How to read this` — bullets defining **Span**, **Active** (every event — commit or session
+  message — padded ±10 min, clipped to the day, then merged; a gap >90 min starts a new block), and
+  any data-quality caveat (e.g. periods with commits but no agent-session logs → commit count is the
+  firmer signal, active hours undercount).
 - `## Summary` — active days / commit days / off days; deduped commits; PRs opened / merged;
   Claude + Codex session counts; total span and total active hours; busiest-by-commits (top ~5);
   longest-active (top ~5); the explicit off-days list.
@@ -685,6 +694,9 @@ the rendered files if a step fails.
 - **Incremental is replace-by-date, not add.** Recompute whole days in the window and replace them;
   reuse all earlier days from state. Re-finalize the last covered day (a mid-run left it partial).
 - **`--all` everywhere** on git log/reflog; **filter by author**; **dedup by hash**.
+- **Sessions are per-message points, clipped to the day — never a `min→max` span.** A session left
+  open overnight or resumed across days otherwise counts idle/empty hours as active (and can exceed
+  24h/day). No day may exceed 24h active; if one does, this is why.
 - **UTC → tz** for Claude/Codex/GitHub/Linear stamps before day-bucketing; git `%aI` is already offset-aware.
 - Be honest about data quality in the methodology + footnote (e.g. ranges with commits but no agent
   logs undercount active hours — say so).
