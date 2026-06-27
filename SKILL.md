@@ -28,6 +28,15 @@ Evidence sources: **git commits + reflog** across all clones/worktrees, **Claude
 session logs**, **GitHub PRs** (`gh`), and **Linear issue lifecycle** (MCP). Hours are
 *activity-based estimates*, not stopwatch time.
 
+**One evolving timesheet, brought up to date on every run.** The first run is a full reconstruction
+over the range; it also writes a hidden **state file** (the durable per-day dataset). Every later run
+**catches up to *now***: it reads the state, re-fetches evidence only for the trailing edge (the last
+covered day, which a mid-run leaves partial, through the current moment — spanning any skipped days),
+merges, and re-renders the same files in place. A full 6-week reconstruction takes minutes; a daily
+top-up takes seconds, because the slow sources (Linear, session-log parsing) are scoped to the small
+window. `--full` forces a clean rebuild. This is **correct** because every signal is bucketed by its
+own event timestamp, so days already computed never change — only the trailing edge can.
+
 This skill is **pure instructions** — there is no pre-bundled helper script. For the deterministic
 number-crunching (parsing git output, converting timezones, computing work blocks, templating the
 HTML) you SHOULD write a short throwaway script into the scratchpad at runtime and run it; that
@@ -43,28 +52,68 @@ plan (range / repos / output paths), then **generate without pausing**.
 
 | Flag | Default |
 |---|---|
-| `--from YYYY-MM-DD` | `--to` minus 6 weeks |
-| `--to YYYY-MM-DD` | yesterday (relative to today) |
+| `--from YYYY-MM-DD` | first run: `--to` minus 6 weeks. Later runs: reuse the saved `from`. |
+| `--to YYYY-MM-DD` | **now** (today) — the timesheet always catches up to the current moment |
 | `--name <prefix>` | basename of the **anchor repo** (the cwd project — see Step 1) |
 | `--out <dir>` | `~/Desktop/<name>-timesheets/` |
 | `--repo <path>` (repeatable) | autodiscover from the anchor repo — see Step 1 |
 | `--author <email>` | git `user.email`; falls back to `me@vijay-patel.co.uk` |
 | `--tz` | `Europe/London` |
+| `--full` | ignore any saved state and rebuild the whole range from scratch |
+| `--since YYYY-MM-DD` | widen the incremental recompute window back to this date (refresh older days) |
 
 A `2026-05-15..2026-06-26` positional form is also accepted as `--from..--to`.
 
-Output filenames: `<out>/<name>-worklog-<from>_to_<to>.{md,csv,html}`.
+**Output files (stable — one evolving timesheet, updated in place):**
+`<out>/<name>-worklog.{md,csv,html}` plus the hidden state file `<out>/.<name>-worklog.state.json`.
+The covered date range is shown *inside* the documents, not in the filenames, so each run overwrites
+the same three files. (`--from`/`--to` adjust the range *inside* the one timesheet; they do not change
+the filenames.)
 
-Print a short block before generating, e.g.:
+Print a short block before generating — state the mode (see Step 0.5), e.g.:
 ```
-Resolved:
-  project  acme   (anchor: ~/code/acme — current directory)
-  range    2026-05-16 .. 2026-06-26   (author: you@example.com, tz: Europe/London)
-  clones   ~/code/acme (+3 worktrees), ~/Downloads/acme-staging (+1)   [matched by shared remote]
-  out      ~/Desktop/acme-timesheets/
-→ generating md, csv, html…
+Resolved:  project acme  ·  author you@example.com  ·  tz Europe/London  ·  out ~/Desktop/acme-timesheets/
+Mode:      UPDATE (state found, covered through 2026-06-26 14:30)
+           → recompute 2026-06-26 → now (2026-06-27 16:40); reuse 41 earlier days
+→ updating md, csv, html…
 ```
-Create `<out>` with `mkdir -p` if missing.
+(First run instead prints `Mode: FULL (no state) → 2026-05-16 .. now`.) Create `<out>` with
+`mkdir -p` if missing.
+
+---
+
+## Step 0.5 — Load state & choose mode (FULL vs UPDATE)
+
+Look for the state file `<out>/.<name>-worklog.state.json`.
+
+- **No state file, or `--full`, or `--from` earlier than the saved `from`** → **FULL** run.
+  Range = `[from .. now]` (`from` = `--from` or `--to` − 6 weeks). Gather everything (Steps 1–4), then
+  write the state file. (`--from` earlier than the saved start forces FULL because that older span was
+  never gathered.)
+- **State file present** → **UPDATE** run. Read it. Reuse `from`, `author`, `tz`, repo labels, and the
+  prior `records[]`. Compute the **recompute window**:
+  - `window_start` = `--since` if given, else the **local date of the saved `covered_through`** (the
+    last run's last day — re-finalize it, since a mid-run left it partial);
+  - `window_end` = **now**.
+  Only days in `[window_start .. today]` get re-gathered and recomputed (Steps 1–3, scoped); every day
+  before `window_start` is reused verbatim from state.
+
+### State file schema (`<out>/.<name>-worklog.state.json`)
+```json
+{
+  "schema": 1,
+  "name": "acme",
+  "from": "2026-05-15",
+  "covered_through": "2026-06-26T14:30:00+01:00",
+  "generated_at": "2026-06-26T14:30:11+01:00",
+  "author": "you@example.com",
+  "tz": "Europe/London",
+  "repos": [{"path": "/Users/you/code/acme", "label": "clone A"}],
+  "records": [ { …one enriched per-day record (Step 3 shape)… } ]
+}
+```
+`records[]` is the durable source of truth; the `.md/.csv/.html` are rendered from it. Write it
+**after** the three files succeed (so a crash never leaves state ahead of the outputs).
 
 ---
 
@@ -119,6 +168,21 @@ project (its basename → `--name`). Print which project was chosen so the user 
 
 **Convert every timestamp from UTC (or its stored offset) to `--tz` before bucketing into a calendar
 day.** All four sources below stamp in UTC except git, which gives an offset-aware time via `%aI`.
+
+**Incremental scoping (UPDATE mode).** In UPDATE mode the gather window is
+`[window_start 00:00 .. now]` (from Step 0.5), **not** the full range — this is the entire speed win,
+so scope each source to it:
+- **git** — `--since=<window_start>T00:00:00<tzoffset>` (the `--until` is now). Fast either way.
+- **Claude sessions** — only read `.jsonl` files whose **mtime ≥ `window_start`**
+  (`find ~/.claude/projects -name '*.jsonl' -newermt <window_start>`); skip the rest. This avoids
+  re-parsing thousands of old transcripts and is the biggest saving.
+- **Codex sessions** — only the date-partitioned dirs `~/.codex/sessions/YYYY/MM/DD/` with date
+  `≥ window_start`.
+- **GitHub PRs** — query the window twice and union: `--created=<window_start>..<today>` **and**
+  `--merged-at=<window_start>..<today>` (so a PR opened earlier but merged inside the window is caught).
+- **Linear (MCP)** — `list_issues` with `updatedAt >= <window_start>` (+ comments) only.
+
+(FULL mode uses the full range as `window_start = from`.)
 
 ### 2a. Git commits (the firmest signal)
 Per clone:
@@ -230,10 +294,33 @@ for each day in [from..to]:
 
 ---
 
+## Step 3.5 — Merge into prior state (UPDATE mode only)
+
+FULL mode skips this — its recomputed records ARE the full dataset.
+
+In UPDATE mode you only built records for `[window_start .. today]`. Merge them into the saved
+`records[]`:
+
+1. **Replace by date.** For every recomputed day, drop the old record with that `date` and insert the
+   new one. Recompute is authoritative for those days (a commit/session belongs to exactly one day and
+   that day was rebuilt from scratch), so there is **no double-counting** — replace, never add.
+2. **Append new days.** Days after the previous `covered_through` are simply added.
+3. **Keep older days untouched.** Everything before `window_start` is reused verbatim.
+4. **Fill gaps.** Ensure one record per calendar day from `from` to today; any day with no events is an
+   `off` record (so a skipped week shows as off days, not missing rows).
+5. Sort by `date`. Recompute all **aggregates** (KPIs, weekly totals, busiest/longest/off lists) from
+   the full merged set — never from the window alone.
+
+The merged `records[]` is what Step 4 renders and what you write back to the state file (with
+`covered_through = now`, `generated_at = now`).
+
+---
+
 ## Step 4 — Write the outputs (strict order)
 
-### 4a. Write the `.md` FIRST  → `<out>/<name>-worklog-<from>_to_<to>.md`
-Mirror the reference structure:
+### 4a. Write the `.md` FIRST  → `<out>/<name>-worklog.md`
+Render from the **full merged `records[]`** (not just the window). The covered range
+`(<from-pretty> – <now-pretty>)` is shown in the title/subtitle. Mirror the reference structure:
 
 - `# <Name> — daily work log (<from-pretty> – <to-pretty>)`
 - An italic methodology line: _Forensic reconstruction from this machine. Evidence: git commits +
@@ -252,7 +339,7 @@ Mirror the reference structure:
   - `  - _Where:_ <repo labels>  ·  _Tickets:_ <ticket ids>` (omit empties)
   - padded block sub-lines: `    - <HH:MM>–<HH:MM> (<Hh MM>) — <n> commits[, <n> Claude][, <n> Codex]`
 
-### 4b. Write the `.csv`  → `<out>/<name>-worklog-<from>_to_<to>.csv`
+### 4b. Write the `.csv`  → `<out>/<name>-worklog.csv`
 Exact 18-column header (one row per day, text fields quoted):
 ```
 date,weekday,active_start,active_end,span_hours,active_hours,session_blocks,commits,claude_sessions,codex_sessions,prs_opened,prs_merged,linear_events,reflog_actions,repos_touched,tickets,note,what_worked_on
@@ -260,7 +347,7 @@ date,weekday,active_start,active_end,span_hours,active_hours,session_blocks,comm
 `active_start`/`active_end` = `HH:MM` of the unpadded span bounds (blank on off days);
 `repos_touched` = labels joined by spaces; `tickets` = ids joined by spaces.
 
-### 4c. Generate the `.html` LAST  → `<out>/<name>-worklog-<from>_to_<to>.html`
+### 4c. Generate the `.html` LAST  → `<out>/<name>-worklog.html`
 Only **after** the `.md` is on disk. The dashboard is a **single self-contained file styled with
 shadcn/ui** — React + Tailwind + Recharts + the shadcn design tokens are pulled from CDNs, and
 shadcn-style `Card` / `Badge` / `Table` / chart components are defined inline. It still opens by
@@ -527,6 +614,12 @@ ReactDOM.createRoot(_root).render(<App/>);
 </script></body></html>
 ````
 
+### 4d. Write the state file LAST  → `<out>/.<name>-worklog.state.json`
+Only **after** the `.md`/`.csv`/`.html` are written, persist the full merged dataset + metadata using
+the Step 0.5 schema (`covered_through = now`, `generated_at = now`, the resolved `from`, `author`,
+`tz`, `repos`, and the complete `records[]`). Writing it last guarantees the state never gets ahead of
+the rendered files if a step fails.
+
 ---
 
 ## Step 5 — Sanity-check before finishing
@@ -544,11 +637,19 @@ ReactDOM.createRoot(_root).render(<App/>);
   confirm `<html>` gains/loses `dark`, the body bg flips (light `rgb(255,255,255)` ↔ dark
   `rgb(9,9,11)`), and the choice persists to `localStorage.theme`. If the page is unstyled or the
   chart is missing, the CDN scripts were blocked — say so rather than shipping a broken file.
-- Report the three output paths and the headline KPIs to the user, and note the file needs internet
-  on first open (CDN scripts).
+- **UPDATE-mode checks:** the state file exists and its `covered_through` is now; days before
+  `window_start` are byte-identical to the prior run (only the trailing edge changed); the merged
+  record count = one per day from `from` to today (no gaps, no dupes). **Parity:** an UPDATE result
+  must match a `--full` rebuild of the same range — spot-check totals (commits/PRs/active hours) are
+  identical. If they differ, the merge or windowing is wrong.
+- Report the output paths, the mode (FULL/UPDATE), what the update changed (re-finalized day + new
+  days, with deltas), and the headline KPIs. Note the file needs internet on first open (CDN scripts).
 
 ## Notes & gotchas
-- **Order matters**: write `.md` → `.csv` → `.html`. Never emit the HTML before the markdown exists.
+- **Order matters**: write `.md` → `.csv` → `.html` → state file. Never emit the HTML before the
+  markdown, and never write state before the three files (so state never gets ahead of the outputs).
+- **Incremental is replace-by-date, not add.** Recompute whole days in the window and replace them;
+  reuse all earlier days from state. Re-finalize the last covered day (a mid-run left it partial).
 - **`--all` everywhere** on git log/reflog; **filter by author**; **dedup by hash**.
 - **UTC → tz** for Claude/Codex/GitHub/Linear stamps before day-bucketing; git `%aI` is already offset-aware.
 - Be honest about data quality in the methodology + footnote (e.g. ranges with commits but no agent
