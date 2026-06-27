@@ -20,8 +20,8 @@ evidence, then produce three internally-consistent files:
 1. a **markdown worklog** (`.md`) — the human-readable source of truth (written **first**),
 2. a flat **`.csv`** (one row per day),
 3. an interactive **`.html`** dashboard styled with **shadcn/ui** (React + Tailwind + Recharts via
-   CDN; KPI cards, hours/day bar chart, weekly progress bars, sortable detail table with ticket
-   badges) — generated **last, after the `.md` exists**.
+   CDN; KPI cards, a shadcn-style gradient **area chart** for hours/day, weekly progress bars, and a
+   sortable detail table with ticket badges) — generated **last, after the `.md` exists**.
 
 Evidence sources: **git commits + reflog** across all clones/worktrees, **Claude Code + Codex
 session logs**, **GitHub PRs** (`gh`), and **Linear issue lifecycle** (MCP). Hours are
@@ -294,9 +294,12 @@ the head.
    Tailwind **v3**, where the global `tailwind.config` object wires the tokens. Do **NOT** swap in
    `@tailwindcss/browser` (v4) — v4 ignores `tailwind.config` (CSS-first `@theme`) and the tokens
    silently stop generating, so `bg-card`/`border-border` produce nothing.
-2. **Tokens as HSL triplets** in a plain `<style>` `:root`/`.dark` (e.g. `--background:0 0% 100%`).
-   They MUST be HSL triplets because the config maps colors as `hsl(var(--token))`. Do not paste the
-   newer oklch values from ui.shadcn.com here — they'd be double-wrapped in `hsl()` and break.
+2. **Tokens as HSL triplets** in a plain `<style>` `:root`/`.dark` (e.g. `--background:0 0% 100%`),
+   and the config must map colors with the **`<alpha-value>` placeholder**:
+   `border:'hsl(var(--border) / <alpha-value>)'` (not bare `hsl(var(--border))`). Without the
+   placeholder, opacity utilities shadcn relies on — `border-border/50`, `hover:bg-muted/50`,
+   `bg-primary/90` — silently don't apply. Tokens MUST be HSL triplets (not the newer oklch values
+   from ui.shadcn.com) because the config wraps them in `hsl()`.
 3. **The shadcn base layer is mandatory** — a `<style type="text/tailwindcss">` block with
    `@layer base{ *{ @apply border-border; } body{ @apply bg-background text-foreground; } }`.
    This is what shadcn ships in `globals.css`; without it every border falls back to Tailwind's
@@ -311,6 +314,16 @@ the head.
    and `window.Recharts` is `undefined` (chart + whole app fail to mount). No `crossorigin` attribute
    (it triggers CORS failures on CDN redirects from `file://`).
 6. **Font:** Inter via Google Fonts, `font-sans`+`antialiased` on `<body>`.
+7. **Chart = the shadcn Chart pattern, not a bare Recharts chart.** Wrap the chart in a
+   `ChartContainer`-style div that scopes a `--color-<key>` CSS var and carries the recharts overrides
+   (`[&_.recharts-surface]:outline-none`, `[&_.recharts-layer]:outline-none`,
+   `[&_.recharts-sector]:outline-none`, `[&_.recharts-dot]:stroke-transparent`). Use a gradient
+   **`AreaChart`** (`<defs><linearGradient>` from `--color` at 0.8 → 0.1 opacity; `Area type="natural"
+   stroke="var(--color-…)" fill="url(#…)" fillOpacity={0.4} dot={false}`), `CartesianGrid vertical={false}`
+   + token-colored axes (`tickLine`/`axisLine` false, ticks filled `muted-foreground`), and a
+   `ChartTooltipContent`-style tooltip card: `rounded-lg border border-border/50 bg-background … shadow-xl`
+   with a colored `rounded-[2px]` indicator and a `font-mono … tabular-nums` value. A plain Recharts
+   `<BarChart>` with the default tooltip is the tell that it's "not true shadcn."
 7. **Verify in a browser before declaring done** (Step 5): no console errors, `window.Recharts` is an
    object, `getComputedStyle(body).backgroundColor` is white, and a `.bg-card` border-color equals the
    token (`rgb(228, 228, 231)`), not gray-200 (`rgb(229, 231, 235)`).
@@ -326,21 +339,21 @@ the head.
 <script>
 tailwind.config={darkMode:['class'],theme:{extend:{
  fontFamily:{sans:['Inter','ui-sans-serif','system-ui','-apple-system','Segoe UI','Roboto','Helvetica','Arial','sans-serif']},
- colors:{border:'hsl(var(--border))',input:'hsl(var(--input))',ring:'hsl(var(--ring))',
-  background:'hsl(var(--background))',foreground:'hsl(var(--foreground))',
-  primary:{DEFAULT:'hsl(var(--primary))',foreground:'hsl(var(--primary-foreground))'},
-  secondary:{DEFAULT:'hsl(var(--secondary))',foreground:'hsl(var(--secondary-foreground))'},
-  muted:{DEFAULT:'hsl(var(--muted))',foreground:'hsl(var(--muted-foreground))'},
-  accent:{DEFAULT:'hsl(var(--accent))',foreground:'hsl(var(--accent-foreground))'},
-  destructive:{DEFAULT:'hsl(var(--destructive))',foreground:'hsl(var(--destructive-foreground))'},
-  popover:{DEFAULT:'hsl(var(--popover))',foreground:'hsl(var(--popover-foreground))'},
-  card:{DEFAULT:'hsl(var(--card))',foreground:'hsl(var(--card-foreground))'},
-  'chart-1':'hsl(var(--chart-1))','chart-2':'hsl(var(--chart-2))','chart-3':'hsl(var(--chart-3))',
-  'chart-4':'hsl(var(--chart-4))','chart-5':'hsl(var(--chart-5))'},
+ colors:{border:'hsl(var(--border) / <alpha-value>)',input:'hsl(var(--input) / <alpha-value>)',ring:'hsl(var(--ring) / <alpha-value>)',
+  background:'hsl(var(--background) / <alpha-value>)',foreground:'hsl(var(--foreground) / <alpha-value>)',
+  primary:{DEFAULT:'hsl(var(--primary) / <alpha-value>)',foreground:'hsl(var(--primary-foreground) / <alpha-value>)'},
+  secondary:{DEFAULT:'hsl(var(--secondary) / <alpha-value>)',foreground:'hsl(var(--secondary-foreground) / <alpha-value>)'},
+  muted:{DEFAULT:'hsl(var(--muted) / <alpha-value>)',foreground:'hsl(var(--muted-foreground) / <alpha-value>)'},
+  accent:{DEFAULT:'hsl(var(--accent) / <alpha-value>)',foreground:'hsl(var(--accent-foreground) / <alpha-value>)'},
+  destructive:{DEFAULT:'hsl(var(--destructive) / <alpha-value>)',foreground:'hsl(var(--destructive-foreground) / <alpha-value>)'},
+  popover:{DEFAULT:'hsl(var(--popover) / <alpha-value>)',foreground:'hsl(var(--popover-foreground) / <alpha-value>)'},
+  card:{DEFAULT:'hsl(var(--card) / <alpha-value>)',foreground:'hsl(var(--card-foreground) / <alpha-value>)'},
+  'chart-1':'hsl(var(--chart-1) / <alpha-value>)','chart-2':'hsl(var(--chart-2) / <alpha-value>)','chart-3':'hsl(var(--chart-3) / <alpha-value>)',
+  'chart-4':'hsl(var(--chart-4) / <alpha-value>)','chart-5':'hsl(var(--chart-5) / <alpha-value>)'},
  borderRadius:{lg:'var(--radius)',md:'calc(var(--radius) - 2px)',sm:'calc(var(--radius) - 4px)'}}}}
 </script>
 <style>
-/* shadcn/ui default theme tokens (HSL triplets, for Tailwind v3 hsl(var(--x)) mapping) */
+/* shadcn/ui default theme tokens (HSL triplets, for Tailwind v3 hsl(var(--x) / <alpha-value>) mapping) */
 :root{--background:0 0% 100%;--foreground:240 10% 3.9%;--card:0 0% 100%;--card-foreground:240 10% 3.9%;
  --popover:0 0% 100%;--popover-foreground:240 10% 3.9%;--primary:240 5.9% 10%;--primary-foreground:0 0% 98%;
  --secondary:240 4.8% 95.9%;--secondary-foreground:240 5.9% 10%;--muted:240 4.8% 95.9%;--muted-foreground:240 3.8% 46.1%;
@@ -355,7 +368,7 @@ tailwind.config={darkMode:['class'],theme:{extend:{
  --chart-1:221.2 83.2% 53.3%;--chart-2:212 95% 68%;--chart-3:216 92% 60%;--chart-4:210 98% 78%;--chart-5:212 97% 87%;}
 </style>
 <style type="text/tailwindcss">
-/* shadcn/ui base layer — makes every border + the body use the theme tokens */
+/* shadcn/ui base layer — every border + the body use the theme tokens */
 @layer base{
   *{ @apply border-border; }
   body{ @apply bg-background text-foreground; }
@@ -379,7 +392,7 @@ const {useState,useMemo}=React;
 const R=window.Recharts;
 const cn=(...c)=>c.filter(Boolean).join(' ');
 // shadcn-style primitives
-const Card=({className,children})=><div className={cn("rounded-lg border bg-card text-card-foreground shadow-sm",className)}>{children}</div>;
+const Card=({className,children})=><div className={cn("rounded-xl border bg-card text-card-foreground shadow-sm",className)}>{children}</div>;
 const CardHeader=({className,children})=><div className={cn("flex flex-col space-y-1.5 p-6",className)}>{children}</div>;
 const CardTitle=({className,children})=><h3 className={cn("font-semibold leading-none tracking-tight",className)}>{children}</h3>;
 const CardDescription=({className,children})=><p className={cn("text-sm text-muted-foreground",className)}>{children}</p>;
@@ -398,30 +411,49 @@ const mondayOf=iso=>{const[y,m,dd]=iso.split('-').map(Number);const u=new Date(D
 const win=d=>d.off?'—':toHM(d.start)+'–'+toHM(d.end);
 const sum=k=>DATA.reduce((a,d)=>a+(d[k]||0),0);
 const worked=DATA.filter(d=>!d.off);
-// chart tooltip (shadcn chart style)
+// shadcn ChartContainer: scopes --color-* vars + applies the recharts overrides
+const CHART_OVERRIDES="text-xs [&_.recharts-surface]:outline-none [&_.recharts-layer]:outline-none [&_.recharts-sector]:outline-none [&_.recharts-dot]:stroke-transparent";
+function ChartContainer({className,style,children}){
+ return <div className={cn("w-full",CHART_OVERRIDES,className)} style={style}>{children}</div>;
+}
+// shadcn ChartTooltipContent
 function ChartTip({active,payload}){
  if(!active||!payload||!payload.length)return null;const d=payload[0].payload;
- return <div className="rounded-lg border bg-background px-3 py-2 text-xs shadow-md">
-  <div className="font-medium">{d.dow} {fmtUK(d.date)}</div>
-  {d.off?<div className="text-muted-foreground">day off</div>:<>
-   <div className="text-muted-foreground">worked {win(d)}</div>
-   <div className="mt-1"><span className="font-semibold text-foreground">{d.hours}h</span> · {d.commits} commits · {d.sessions} sessions</div>
-   {d.what?<div className="mt-1 max-w-[260px] text-muted-foreground line-clamp-3">{d.what}</div>:null}</>}
+ const rows=d.off?[]:[['Hours',d.hours+'h'],['Commits',d.commits],['Sessions',d.sessions]];
+ return <div className="grid min-w-[9rem] items-start gap-1.5 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-xl">
+  <div className="font-medium">{d.dow} {fmtUK(d.date)}{d.off?' · day off':''}</div>
+  {d.off?null:<div className="grid gap-1.5">
+   {rows.map(([k,v],i)=>(
+    <div key={k} className="flex w-full items-center gap-2">
+     {i===0?<div className="h-2.5 w-2.5 shrink-0 rounded-[2px]" style={{background:'var(--color-hours)'}}/>:<div className="w-2.5 shrink-0"/>}
+     <div className="flex flex-1 items-center justify-between leading-none">
+      <span className="text-muted-foreground">{k}</span>
+      <span className="font-mono font-medium tabular-nums text-foreground">{v}</span>
+     </div>
+    </div>))}
+   {d.what?<div className="mt-0.5 max-w-[220px] text-muted-foreground line-clamp-3">{d.what}</div>:null}
+  </div>}
  </div>;
 }
 function HoursChart(){
- const data=DATA.map((d,i)=>({...d,label:fmtUK(d.date).slice(0,5)}));
- return <R.ResponsiveContainer width="100%" height={260}>
-  <R.BarChart data={data} margin={{top:8,right:8,left:-12,bottom:0}}>
-   <R.CartesianGrid vertical={false} strokeDasharray="3 3" stroke="hsl(var(--border))"/>
-   <R.XAxis dataKey="label" interval={2} tickLine={false} axisLine={false} tick={{fontSize:10,fill:'hsl(var(--muted-foreground))'}}/>
-   <R.YAxis width={34} tickLine={false} axisLine={false} tick={{fontSize:10,fill:'hsl(var(--muted-foreground))'}} tickFormatter={v=>v+'h'}/>
-   <R.Tooltip cursor={{fill:'hsl(var(--muted))',opacity:.5}} content={<ChartTip/>}/>
-   <R.Bar dataKey="hours" radius={[4,4,0,0]}>
-    {data.map((d,i)=><R.Cell key={i} fill={d.off?'hsl(var(--muted))':'hsl(var(--chart-1))'}/>)}
-   </R.Bar>
-  </R.BarChart>
- </R.ResponsiveContainer>;
+ const data=DATA.map(d=>({...d,label:fmtUK(d.date).slice(0,5)}));
+ return <ChartContainer className="h-[250px]" style={{['--color-hours']:'hsl(var(--chart-1))'}}>
+  <R.ResponsiveContainer width="100%" height="100%">
+   <R.AreaChart data={data} margin={{top:10,right:12,left:-12,bottom:0}}>
+    <defs>
+     <linearGradient id="fillHours" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="5%" stopColor="var(--color-hours)" stopOpacity={0.8}/>
+      <stop offset="95%" stopColor="var(--color-hours)" stopOpacity={0.1}/>
+     </linearGradient>
+    </defs>
+    <R.CartesianGrid vertical={false} stroke="hsl(var(--border))" strokeOpacity={0.7}/>
+    <R.XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} interval={2} tick={{fontSize:10,fill:'hsl(var(--muted-foreground))'}}/>
+    <R.YAxis tickLine={false} axisLine={false} width={30} tickMargin={4} tick={{fontSize:10,fill:'hsl(var(--muted-foreground))'}} tickFormatter={v=>v+'h'}/>
+    <R.Tooltip cursor={false} content={<ChartTip/>}/>
+    <R.Area dataKey="hours" type="natural" stroke="var(--color-hours)" strokeWidth={2} fill="url(#fillHours)" fillOpacity={0.4} dot={false} activeDot={{r:3,strokeWidth:0}}/>
+   </R.AreaChart>
+  </R.ResponsiveContainer>
+ </ChartContainer>;
 }
 function Weeks(){
  const weeks=useMemo(()=>{const wk={};DATA.forEach(d=>{const k=mondayOf(d.date);(wk[k]=wk[k]||{key:k,h:0,c:0,days:0});wk[k].h+=d.hours;wk[k].c+=d.commits;if(!d.off)wk[k].days++;});return Object.values(wk).sort((a,b)=>a.key.localeCompare(b.key));},[]);
@@ -460,7 +492,7 @@ function App(){
    <p className="text-sm text-muted-foreground max-w-3xl">{DATE_RANGE} <b>Estimated hours</b> = how long you were active each day, from your git commits, coding-agent sessions and local git activity. A break longer than 90 minutes ends a working block; the day's hours are the blocks added up. <b>Worked</b> shows the first→last activity time.</p>
   </div>
   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{kpis.map(k=><Kpi key={k[0]} label={k[0]} value={k[1]}/>)}</div>
-  <Card><CardHeader className="pb-2"><CardTitle className="text-base">Hours per day</CardTitle><CardDescription>Hover a bar for the day's detail. Empty = day off.</CardDescription></CardHeader><CardContent><HoursChart/></CardContent></Card>
+  <Card><CardHeader className="pb-2"><CardTitle className="text-base">Hours per day</CardTitle><CardDescription>{DATE_RANGE} Hover the area for a day's detail.</CardDescription></CardHeader><CardContent><HoursChart/></CardContent></Card>
   <Card><CardHeader className="pb-2"><CardTitle className="text-base">By week</CardTitle></CardHeader><CardContent><Weeks/></CardContent></Card>
   <Card><CardHeader className="pb-2"><CardTitle className="text-base">Every day</CardTitle><CardDescription>Click a column header to sort.</CardDescription></CardHeader><CardContent><DayTable/></CardContent></Card>
   <p className="text-xs text-muted-foreground max-w-3xl">{FOOTNOTE}</p>
