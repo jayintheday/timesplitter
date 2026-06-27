@@ -1,0 +1,444 @@
+---
+name: time-splitters
+version: 1.0.0
+description: Forensically reconstruct a daily work log from git, coding-agent sessions, GitHub PRs and Linear, then write a markdown worklog plus a shadcn/ui-styled interactive HTML hours dashboard (and a CSV). Triggers on "/time-splitters", "reconstruct my hours", "build my timesheet/worklog".
+effort: medium
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - Edit
+  - Grep
+  - Glob
+---
+
+# /time-splitters
+
+Reconstruct how much the user actually worked over a date range by mining **this machine** for
+evidence, then produce three internally-consistent files:
+
+1. a **markdown worklog** (`.md`) — the human-readable source of truth (written **first**),
+2. a flat **`.csv`** (one row per day),
+3. an interactive **`.html`** dashboard styled with **shadcn/ui** (React + Tailwind + Recharts via
+   CDN; KPI cards, hours/day bar chart, weekly progress bars, sortable detail table with ticket
+   badges) — generated **last, after the `.md` exists**.
+
+Evidence sources: **git commits + reflog** across all clones/worktrees, **Claude Code + Codex
+session logs**, **GitHub PRs** (`gh`), and **Linear issue lifecycle** (MCP). Hours are
+*activity-based estimates*, not stopwatch time.
+
+This skill is **pure instructions** — there is no pre-bundled helper script. For the deterministic
+number-crunching (parsing git output, converting timezones, computing work blocks, templating the
+HTML) you SHOULD write a short throwaway script into the scratchpad at runtime and run it; that
+keeps the math reliable and stays fully transparent (the script is fresh and visible each run). Use
+`python3` (verified available, stdlib `zoneinfo`/`json`/`csv` — no pip needed).
+
+---
+
+## Step 0 — Resolve config, then print the plan
+
+Parse optional flags. On a **bare `/time-splitters`** resolve smart defaults, print the resolved
+plan (range / repos / output paths), then **generate without pausing**.
+
+| Flag | Default |
+|---|---|
+| `--from YYYY-MM-DD` | `--to` minus 6 weeks |
+| `--to YYYY-MM-DD` | yesterday (relative to today) |
+| `--name <prefix>` | basename of the **anchor repo** (the cwd project — see Step 1) |
+| `--out <dir>` | `~/Desktop/<name>-timesheets/` |
+| `--repo <path>` (repeatable) | autodiscover from the anchor repo — see Step 1 |
+| `--author <email>` | git `user.email`; falls back to `me@vijay-patel.co.uk` |
+| `--tz` | `Europe/London` |
+
+A `2026-05-15..2026-06-26` positional form is also accepted as `--from..--to`.
+
+Output filenames: `<out>/<name>-worklog-<from>_to_<to>.{md,csv,html}`.
+
+Print a short block before generating, e.g.:
+```
+Resolved:
+  project  acme   (anchor: ~/code/acme — current directory)
+  range    2026-05-16 .. 2026-06-26   (author: you@example.com, tz: Europe/London)
+  clones   ~/code/acme (+3 worktrees), ~/Downloads/acme-staging (+1)   [matched by shared remote]
+  out      ~/Desktop/acme-timesheets/
+→ generating md, csv, html…
+```
+Create `<out>` with `mkdir -p` if missing.
+
+---
+
+## Step 1 — Discover repos & worktrees
+
+**The current project is the default.** Anchor on the repo the user is sitting in, then scan other
+locations to find *that same project's* other clones/worktrees — never mix in unrelated projects.
+
+### 1a. Establish the anchor repo
+- If `--repo` was given, the first one is the anchor.
+- Else if the cwd is inside a git repo (`git rev-parse --show-toplevel`), that toplevel is the anchor.
+- Else (not in a repo, no `--repo`) → **fallback**, see 1c.
+
+From the anchor, capture:
+- its toplevel path and basename → default `--name` (e.g. cwd `~/code/acme` → name `acme`);
+- its **full remote set** — `git -C <anchor> remote -v` → normalize each URL (lowercase, strip
+  `.git`, strip protocol/host so `git@github.com:Org/x.git` and `https://github.com/Org/x` match on
+  `org/x`). A repo can have several remotes (e.g. a personal fork **and** the shared origin); keep
+  them all.
+
+### 1b. Find this project's other clones & worktrees (remote-matched)
+Scan likely clone locations for git repos — `~/Downloads/*`, `~/conductor/workspaces/*/*`, and the
+anchor's sibling directories (`<parent-of-anchor>/*`). For each candidate, read its normalized remote
+set and **keep it only if it shares at least one remote with the anchor** (transitively — a fork that
+links two upstreams still clusters together). This is what collapses `clone A`/`clone B`-style
+duplicate checkouts of one product while excluding other projects living in the same folders.
+
+For every kept clone, enumerate worktrees: `git -C <clone> worktree list` (a worktree shares its
+clone's object DB, so `git log --all` in the clone already covers all of them — you only need to
+enumerate worktrees for **labels**, not for extra log passes). Dedup commits by hash across the
+distinct object DBs (one per clone).
+
+Build a concise **path → label** map for the `repos` column: anchor checkout first, then sibling
+clones and worktrees by a short basename/branch-derived label. Keep labels short. Attribute a commit
+to a clone by which clone's object DB contains its hash. **Missing/deleted paths → warn and skip,
+never abort.**
+
+### 1c. Fallback when not in a git repo
+With no anchor and no `--repo`: sweep `~/Downloads/*` and `~/conductor/workspaces/*/*`, cluster repos
+by shared remote, and pick the cluster with the **most commits by `--author` in range** as the
+project (its basename → `--name`). Print which project was chosen so the user can re-run with
+`--repo`/`--name` if it guessed wrong.
+
+> Reference run (the Musta project) for sanity only: anchor remote `org/qorum-meeting-flow` matched
+> two clones — `~/Downloads/qorum-meeting-flow` (also forks `…/qorum-local`) and
+> `~/Downloads/qorum-meeting-flow-dev` — plus their worktrees under `~/conductor/...` and
+> `.claude/worktrees/`. Hash-dedup across the two object DBs = 261 commits.
+
+---
+
+## Step 2 — Gather evidence
+
+**Convert every timestamp from UTC (or its stored offset) to `--tz` before bucketing into a calendar
+day.** All four sources below stamp in UTC except git, which gives an offset-aware time via `%aI`.
+
+### 2a. Git commits (the firmest signal)
+Per clone:
+```bash
+git -C <clonepath> log --all \
+  --since="<from>T00:00:00+01:00" --until="<to+1day>T00:00:00+01:00" \
+  --author="<email>" \
+  --pretty=format:'%H|%aI|%an|%ae|%s'
+```
+- `--all` is **mandatory** — the dated work usually isn't on the checked-out branch.
+- **Dedup by full hash `%H`** across all clones (clone A and clone B are separate object DBs that
+  contain the same logical commits). A `set()` of hashes is the dedup.
+- Each commit is a **point event** at `%aI`. Record its repo label, subject `%s`, and any tickets.
+- The deduped commit total is your correctness check.
+
+### 2b. Reflog (best-effort point events)
+```bash
+git -C <clonepath> reflog --all --date=iso
+```
+Use entries in range as extra presence points. Reflog prunes after ~90 days, so treat as optional.
+
+### 2c. Claude Code sessions (real time spans)
+Glob `~/.claude/projects/*/*.jsonl`. Each line is JSON; lines carry a top-level `timestamp`
+(ISO-8601 UTC) and a top-level `cwd`. Per file: **session span = min/max `timestamp`** over lines
+that have one (skip header lines without a timestamp). Attribute the session to a repo by matching
+`cwd` against a discovered repo/worktree path. Count one session per file overlapping the day; the
+span is a real interval `[start,end]`.
+
+### 2d. Codex sessions (real time spans)
+Glob `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. First line is `type:session_meta` with
+`payload.cwd` and `payload.git`. Span = min/max top-level `timestamp`. Attribute via `payload.cwd`.
+
+### 2e. GitHub PRs
+```bash
+gh search prs --author=@me --created=<from>..<to> \
+  --json number,title,createdAt,closedAt,state,repository --limit 1000
+```
+- `prs_opened` per day = bucket `createdAt`.
+- `prs_merged` per day = rows with `state=="merged"`, bucketed by `closedAt` (= merge time).
+- For wide ranges, split the window if you approach the 1000-row cap.
+
+### 2f. Linear (MCP)
+- Resolve the user: `mcp__linear__list_users` / `mcp__linear__get_user` (match the `--author` email).
+- `mcp__linear__list_issues` filtered by assignee = the user and `updatedAt` within range (paginate).
+  Optionally `mcp__linear__list_comments` on candidate issues for finer per-day events.
+- `linear` (per day) = count of user-attributable issue updates/comments that day.
+- Collect Linear issue **identifiers** touched each day to augment tickets.
+
+### 2g. Tickets
+Per day, tickets = sorted-unique union of:
+- regex `[A-Z]+-\d+` (e.g. `LIM-\d+`) found in commit subjects and branch names, **plus**
+- Linear identifiers touched that day.
+
+---
+
+## Step 3 — Build the canonical per-day dataset
+
+Produce **one enriched record per calendar day** in the range (include off days). This single
+dataset is the source for all three files.
+
+```json
+{"date":"2026-06-22","dow":"Mon","start":9.53,"end":23.162,"span_hours":13.63,
+ "hours":13.8,"session_blocks":1,"commits":44,"claude_sessions":16,"codex_sessions":0,
+ "sessions":16,"reflog_actions":0,"prs_opened":22,"pr_m":22,"linear":36,
+ "repos":["clone A","clone B"],"tickets":["LIM-609","..."],"note":"",
+ "what":"LIM-636: …; LIM-633: …","off":false}
+```
+- `sessions` = `claude_sessions + codex_sessions` (HTML uses `sessions`; CSV keeps both split).
+- `pr_m` = merged PRs (HTML key); CSV uses `prs_opened` / `prs_merged`.
+- `what` = the day's commit subjects joined with `; ` (the HTML/CSV escape `<` themselves).
+- `note` = short status when there are no commits, e.g. `agent session(s), no commit` /
+  `Linear planning / ticket updates`. Off day → `off (no activity logged)`.
+
+### Work-block / active-hours algorithm
+`GAP = 90 min`, `PAD = 10 min`, timezone = `--tz`.
+
+```
+for each day in [from..to]:
+    events = sessions (real intervals [start,end])  +  points (commits/reflog/linear at time t)
+    if events empty:
+        emit {off:true, start:null, end:null, hours:0.0, span_hours:0.0, session_blocks:0, …zeros}
+        continue
+
+    # SPAN — the "Worked" window, from UNPADDED bounds
+    span_start = min(start of each session, t of each point)
+    span_end   = max(end   of each session, t of each point)
+    span_hours = round((span_end - span_start) in hours, 2)   # may be 0.0 for a lone point
+
+    # ACTIVE — merge PADDED intervals
+    intervals = [ [s,e] for sessions ] + [ [t-PAD, t+PAD] for points ]
+    sort intervals by start
+    blocks = []; cur = intervals[0]
+    for iv in intervals[1:]:
+        if iv.start - cur.end <= GAP: cur.end = max(cur.end, iv.end)   # same block
+        else: blocks.push(cur); cur = iv                              # gap > 90m → new block
+    blocks.push(cur)
+    hours = round(sum(b.end-b.start for b in blocks) in hours, 1)
+    session_blocks = len(blocks)
+
+    start = decimal_hours(span_start)   # local H + minutes/60  → 18:26 = 18.434
+    end   = decimal_hours(span_end)
+    emit {off:false, start, end, span_hours, hours, session_blocks, …counts, repos, tickets, what}
+```
+
+**Validation anchors** (reference run, 2026-05-15 → 2026-06-26): total deduped commits = **261**;
+2026-05-18 (lone Linear point) → `start==end==13.502`, span `0.0h`, active `0.33h`; 2026-05-15
+(commit 18:26) → padded block `18:16–18:36`; busiest 2026-06-22 → `13.8h`, 44 commits, 16 sessions,
+22 PRs merged. If your numbers diverge wildly, recheck `--all`, the author filter, and tz handling.
+
+---
+
+## Step 4 — Write the outputs (strict order)
+
+### 4a. Write the `.md` FIRST  → `<out>/<name>-worklog-<from>_to_<to>.md`
+Mirror the reference structure:
+
+- `# <Name> — daily work log (<from-pretty> – <to-pretty>)`
+- An italic methodology line: _Forensic reconstruction from this machine. Evidence: git commits +
+  HEAD reflog across <N clones + worktrees>, Claude Code + Codex session logs, GitHub PRs, Linear
+  issue lifecycle. All times local <tz abbrev>._
+- `## How to read this` — bullets defining **Span**, **Active** (90-min gap rule; sessions are real
+  spans, point events padded ±10 min), and any data-quality caveat (e.g. periods with commits but no
+  agent-session logs → commit count is the firmer signal, active hours undercount).
+- `## Summary` — active days / commit days / off days; deduped commits; PRs opened / merged;
+  Claude + Codex session counts; total span and total active hours; busiest-by-commits (top ~5);
+  longest-active (top ~5); the explicit off-days list.
+- `### Weekly totals` — table: `| Week (Mon) | Active days | Commits | Active h | Span h | PRs merged |`.
+- `## Day by day` — grouped by `### Week of <Monday>`, each day:
+  - headline: `**<date> <Dow>** — <HH:MM>–<HH:MM>  ·  **<active>h active** (span <span>h, <n> blocks)  ·  <commits> commits · <sessions> sessions · <opened>PR↑/<merged>PR↓ · <linear> Linear` (append a small tag like `⚙️ manual/web`, `🗂 planning`, `🧪 WIP` where apt). Off days: `**<date> <Dow>** — _off (no activity logged)_`.
+  - `  - _Worked on:_ <commit subjects, truncated>`
+  - `  - _Where:_ <repo labels>  ·  _Tickets:_ <ticket ids>` (omit empties)
+  - padded block sub-lines: `    - <HH:MM>–<HH:MM> (<Hh MM>) — <n> commits[, <n> Claude][, <n> Codex]`
+
+### 4b. Write the `.csv`  → `<out>/<name>-worklog-<from>_to_<to>.csv`
+Exact 18-column header (one row per day, text fields quoted):
+```
+date,weekday,active_start,active_end,span_hours,active_hours,session_blocks,commits,claude_sessions,codex_sessions,prs_opened,prs_merged,linear_events,reflog_actions,repos_touched,tickets,note,what_worked_on
+```
+`active_start`/`active_end` = `HH:MM` of the unpadded span bounds (blank on off days);
+`repos_touched` = labels joined by spaces; `tickets` = ids joined by spaces.
+
+### 4c. Generate the `.html` LAST  → `<out>/<name>-worklog-<from>_to_<to>.html`
+Only **after** the `.md` is on disk. The dashboard is a **single self-contained file styled with
+shadcn/ui** — React + Tailwind + Recharts + the shadcn design tokens are pulled from CDNs, and
+shadcn-style `Card` / `Badge` / `Table` / chart components are defined inline. It still opens by
+double-click (no build/npm), but **needs internet** the first time to fetch the CDN scripts (say so
+when you report the file).
+
+Take the template below and substitute exactly five tokens:
+
+| Token | Where | Fill with |
+|---|---|---|
+| `{{TITLE}}` | `<title>` | e.g. `Musta — hours worked` (HTML-escape) |
+| `{{HEADING}}` | `#root data-title` | same as title (HTML-attr-escape `"` → `&quot;`) |
+| `{{DATE_RANGE}}` | `#root data-range` | e.g. `15 May – 26 Jun 2026.` (HTML-attr-escape) |
+| `{{FOOTNOTE}}` | `#root data-foot` | the caveat line, mirroring the `.md` note (HTML-attr-escape) |
+| `__DATA_JSON__` | `<script>` | `JSON.stringify(records)` — a raw JS array literal, **no surrounding quotes** |
+
+The text tokens live in HTML attributes (not JS string literals), so they only need HTML-attribute
+escaping — no JS escaping. The `records` array must use the HTML record shape (keys: `date,dow,start,
+end,hours,commits,sessions,pr_m,linear,repos,tickets,what,off`). Everything else in the template is
+generic and data-driven — do not change the token config, the component definitions, or the app logic.
+
+CDN-offline note: if the user needs a file that works without internet, that's the "real shadcn
+project" path, not this one — keep this template's CDN model unless they ask otherwise.
+
+#### HTML template (verbatim except the 5 tokens)
+````html
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{{TITLE}}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config={darkMode:['class'],theme:{extend:{
+ colors:{border:'hsl(var(--border))',input:'hsl(var(--input))',ring:'hsl(var(--ring))',
+  background:'hsl(var(--background))',foreground:'hsl(var(--foreground))',
+  primary:{DEFAULT:'hsl(var(--primary))',foreground:'hsl(var(--primary-foreground))'},
+  secondary:{DEFAULT:'hsl(var(--secondary))',foreground:'hsl(var(--secondary-foreground))'},
+  muted:{DEFAULT:'hsl(var(--muted))',foreground:'hsl(var(--muted-foreground))'},
+  accent:{DEFAULT:'hsl(var(--accent))',foreground:'hsl(var(--accent-foreground))'},
+  card:{DEFAULT:'hsl(var(--card))',foreground:'hsl(var(--card-foreground))'},
+  destructive:{DEFAULT:'hsl(var(--destructive))',foreground:'hsl(var(--destructive-foreground))'},
+  'chart-1':'hsl(var(--chart-1))','chart-2':'hsl(var(--chart-2))'},
+ borderRadius:{lg:'var(--radius)',md:'calc(var(--radius) - 2px)',sm:'calc(var(--radius) - 4px)'}}}}
+</script>
+<style>
+:root{--background:0 0% 100%;--foreground:240 10% 3.9%;--card:0 0% 100%;--card-foreground:240 10% 3.9%;
+ --popover:0 0% 100%;--popover-foreground:240 10% 3.9%;--primary:240 5.9% 10%;--primary-foreground:0 0% 98%;
+ --secondary:240 4.8% 95.9%;--secondary-foreground:240 5.9% 10%;--muted:240 4.8% 95.9%;--muted-foreground:240 3.8% 46.1%;
+ --accent:240 4.8% 95.9%;--accent-foreground:240 5.9% 10%;--destructive:0 84.2% 60.2%;--destructive-foreground:0 0% 98%;
+ --border:240 5.9% 90%;--input:240 5.9% 90%;--ring:240 10% 3.9%;--radius:0.5rem;
+ --chart-1:221.2 83.2% 53.3%;--chart-2:212 95% 68%;}
+@media (prefers-color-scheme:dark){:root{--background:240 10% 3.9%;--foreground:0 0% 98%;--card:240 10% 3.9%;
+ --card-foreground:0 0% 98%;--popover:240 10% 3.9%;--popover-foreground:0 0% 98%;--primary:0 0% 98%;--primary-foreground:240 5.9% 10%;
+ --secondary:240 3.7% 15.9%;--secondary-foreground:0 0% 98%;--muted:240 3.7% 15.9%;--muted-foreground:240 5% 64.9%;
+ --accent:240 3.7% 15.9%;--accent-foreground:0 0% 98%;--destructive:0 62.8% 30.6%;--destructive-foreground:0 0% 98%;
+ --border:240 3.7% 15.9%;--input:240 3.7% 15.9%;--ring:240 4.9% 83.9%;--chart-1:217.2 91.2% 59.8%;--chart-2:212 95% 68%;}}
+body{background:hsl(var(--background));color:hsl(var(--foreground))}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-is@18.3.1/umd/react-is.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/recharts@2.15.4/umd/Recharts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.4/babel.min.js"></script>
+</head>
+<body class="min-h-screen antialiased">
+<div id="root" data-title="{{HEADING}}" data-range="{{DATE_RANGE}}" data-foot="{{FOOTNOTE}}"></div>
+<script>const DATA=__DATA_JSON__;</script>
+<script type="text/babel" data-presets="react">
+const _root=document.getElementById('root');
+const HEADING=_root.dataset.title, DATE_RANGE=_root.dataset.range, FOOTNOTE=_root.dataset.foot;
+document.title=HEADING;
+const {useState,useMemo}=React;
+const R=window.Recharts;
+const cn=(...c)=>c.filter(Boolean).join(' ');
+// shadcn-style primitives
+const Card=({className,children})=><div className={cn("rounded-lg border bg-card text-card-foreground shadow-sm",className)}>{children}</div>;
+const CardHeader=({className,children})=><div className={cn("flex flex-col space-y-1.5 p-6",className)}>{children}</div>;
+const CardTitle=({className,children})=><h3 className={cn("font-semibold leading-none tracking-tight",className)}>{children}</h3>;
+const CardDescription=({className,children})=><p className={cn("text-sm text-muted-foreground",className)}>{children}</p>;
+const CardContent=({className,children})=><div className={cn("p-6 pt-0",className)}>{children}</div>;
+const Badge=({variant="secondary",className,children})=>{const v={default:"border-transparent bg-primary text-primary-foreground",secondary:"border-transparent bg-secondary text-secondary-foreground",outline:"text-foreground"}[variant];return <span className={cn("inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-medium",v,className)}>{children}</span>;};
+const Table=({children})=><div className="relative w-full overflow-auto"><table className="w-full caption-bottom text-sm">{children}</table></div>;
+const THead=({children})=><thead className="[&_tr]:border-b">{children}</thead>;
+const TBody=({children})=><tbody className="[&_tr:last-child]:border-0">{children}</tbody>;
+const TR=({className,children,...p})=><tr className={cn("border-b transition-colors hover:bg-muted/50",className)} {...p}>{children}</tr>;
+const TH=({className,children,...p})=><th className={cn("h-10 px-2 text-left align-middle font-medium text-muted-foreground select-none",className)} {...p}>{children}</th>;
+const TD=({className,children,...p})=><td className={cn("p-2 align-middle",className)} {...p}>{children}</td>;
+// helpers
+const toHM=d=>{if(d==null)return '–';let m=Math.round(d*60);return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');};
+const fmtUK=iso=>{const p=iso.split('-');return p[2]+'/'+p[1]+'/'+p[0];};
+const mondayOf=iso=>{const[y,m,dd]=iso.split('-').map(Number);const u=new Date(Date.UTC(y,m-1,dd));const off=(u.getUTCDay()+6)%7;u.setUTCDate(u.getUTCDate()-off);return u.toISOString().slice(0,10);};
+const win=d=>d.off?'—':toHM(d.start)+'–'+toHM(d.end);
+const sum=k=>DATA.reduce((a,d)=>a+(d[k]||0),0);
+const worked=DATA.filter(d=>!d.off);
+// chart tooltip (shadcn chart style)
+function ChartTip({active,payload}){
+ if(!active||!payload||!payload.length)return null;const d=payload[0].payload;
+ return <div className="rounded-lg border bg-background px-3 py-2 text-xs shadow-md">
+  <div className="font-medium">{d.dow} {fmtUK(d.date)}</div>
+  {d.off?<div className="text-muted-foreground">day off</div>:<>
+   <div className="text-muted-foreground">worked {win(d)}</div>
+   <div className="mt-1"><span className="font-semibold text-foreground">{d.hours}h</span> · {d.commits} commits · {d.sessions} sessions</div>
+   {d.what?<div className="mt-1 max-w-[260px] text-muted-foreground line-clamp-3">{d.what}</div>:null}</>}
+ </div>;
+}
+function HoursChart(){
+ const data=DATA.map((d,i)=>({...d,label:fmtUK(d.date).slice(0,5)}));
+ return <R.ResponsiveContainer width="100%" height={260}>
+  <R.BarChart data={data} margin={{top:8,right:8,left:-12,bottom:0}}>
+   <R.CartesianGrid vertical={false} strokeDasharray="3 3" stroke="hsl(var(--border))"/>
+   <R.XAxis dataKey="label" interval={2} tickLine={false} axisLine={false} tick={{fontSize:10,fill:'hsl(var(--muted-foreground))'}}/>
+   <R.YAxis width={34} tickLine={false} axisLine={false} tick={{fontSize:10,fill:'hsl(var(--muted-foreground))'}} tickFormatter={v=>v+'h'}/>
+   <R.Tooltip cursor={{fill:'hsl(var(--muted))',opacity:.5}} content={<ChartTip/>}/>
+   <R.Bar dataKey="hours" radius={[4,4,0,0]}>
+    {data.map((d,i)=><R.Cell key={i} fill={d.off?'hsl(var(--muted))':'hsl(var(--chart-1))'}/>)}
+   </R.Bar>
+  </R.BarChart>
+ </R.ResponsiveContainer>;
+}
+function Weeks(){
+ const weeks=useMemo(()=>{const wk={};DATA.forEach(d=>{const k=mondayOf(d.date);(wk[k]=wk[k]||{key:k,h:0,c:0,days:0});wk[k].h+=d.hours;wk[k].c+=d.commits;if(!d.off)wk[k].days++;});return Object.values(wk).sort((a,b)=>a.key.localeCompare(b.key));},[]);
+ const mx=Math.max(...weeks.map(w=>w.h),1);
+ return <div className="space-y-3">{weeks.map((w,i)=>
+  <div key={i} className="flex items-center gap-3">
+   <div className="w-28 shrink-0 text-sm"><span className="font-medium">Week {i+1}</span> <span className="text-muted-foreground text-xs">{fmtUK(w.key)}</span></div>
+   <div className="flex-1 h-2.5 rounded-full bg-muted overflow-hidden"><div className="h-full rounded-full bg-[hsl(var(--chart-1))]" style={{width:Math.round(w.h/mx*100)+'%'}}/></div>
+   <div className="w-12 text-right text-sm font-medium tabular-nums">{Math.round(w.h)}h</div>
+   <div className="w-32 text-right text-xs text-muted-foreground tabular-nums">{w.days} days · {w.c} commits</div>
+  </div>)}</div>;
+}
+function DayTable(){
+ const cols=[{k:'date',l:'Date'},{k:'dow',l:'Day'},{k:'win',l:'Worked'},{k:'hours',l:'Hours',num:1},{k:'commits',l:'Commits',num:1},{k:'sessions',l:'Sessions',num:1},{k:'what',l:'What you worked on'}];
+ const [sort,setSort]=useState({k:'date',dir:1});
+ const val=(d,k)=>k==='win'?(d.start??99):d[k];
+ const rows=useMemo(()=>[...DATA].sort((a,b)=>{let x=val(a,sort.k),y=val(b,sort.k);if(typeof x==='string')return sort.dir*x.localeCompare(y);return sort.dir*((x||0)-(y||0));}),[sort]);
+ const click=k=>setSort(s=>s.k===k?{k,dir:-s.dir}:{k,dir:1});
+ return <Table><THead><TR className="hover:bg-transparent">{cols.map(c=>
+   <TH key={c.k} className={cn("cursor-pointer",c.num&&"text-right")} onClick={()=>click(c.k)}>{c.l}{sort.k===c.k?(sort.dir>0?' ↑':' ↓'):''}</TH>)}</TR></THead>
+  <TBody>{rows.map(d=>
+   <TR key={d.date} className={d.off?"text-muted-foreground":""}>
+    <TD>{fmtUK(d.date)}</TD><TD>{d.dow}</TD><TD className="tabular-nums">{win(d)}</TD>
+    <TD className="text-right tabular-nums">{d.off?'—':d.hours.toFixed(1)}</TD>
+    <TD className="text-right tabular-nums">{d.commits||''}</TD>
+    <TD className="text-right tabular-nums">{d.sessions||''}</TD>
+    <TD className="text-muted-foreground"><span>{d.what||(d.off?'day off':'')}</span>{d.tickets&&d.tickets.length?<span className="ml-1 inline-flex flex-wrap gap-1 align-middle">{d.tickets.map(t=><Badge key={t} variant="outline">{t}</Badge>)}</span>:null}</TD>
+   </TR>)}</TBody></Table>;
+}
+function Kpi({label,value}){return <Card><CardHeader className="pb-2"><CardDescription>{label}</CardDescription><CardTitle className="text-3xl tabular-nums">{value}</CardTitle></CardHeader></Card>;}
+function App(){
+ const kpis=[['Days worked',worked.length+' of '+DATA.length],['Total hours','~'+Math.round(sum('hours'))+'h'],['Commits',sum('commits')],['PRs merged',sum('pr_m')]];
+ return <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
+  <div className="space-y-1">
+   <h1 className="text-2xl font-semibold tracking-tight">{HEADING}</h1>
+   <p className="text-sm text-muted-foreground max-w-3xl">{DATE_RANGE} <b>Estimated hours</b> = how long you were active each day, from your git commits, coding-agent sessions and local git activity. A break longer than 90 minutes ends a working block; the day's hours are the blocks added up. <b>Worked</b> shows the first→last activity time.</p>
+  </div>
+  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{kpis.map(k=><Kpi key={k[0]} label={k[0]} value={k[1]}/>)}</div>
+  <Card><CardHeader className="pb-2"><CardTitle className="text-base">Hours per day</CardTitle><CardDescription>Hover a bar for the day's detail. Empty = day off.</CardDescription></CardHeader><CardContent><HoursChart/></CardContent></Card>
+  <Card><CardHeader className="pb-2"><CardTitle className="text-base">By week</CardTitle></CardHeader><CardContent><Weeks/></CardContent></Card>
+  <Card><CardHeader className="pb-2"><CardTitle className="text-base">Every day</CardTitle><CardDescription>Click a column header to sort.</CardDescription></CardHeader><CardContent><DayTable/></CardContent></Card>
+  <p className="text-xs text-muted-foreground max-w-3xl">{FOOTNOTE}</p>
+ </div>;
+}
+ReactDOM.createRoot(_root).render(<App/>);
+</script></body></html>
+````
+
+---
+
+## Step 5 — Sanity-check before finishing
+
+- The deduped commit total in the `.md` Summary matches
+  `git -C <clone> log --all --since --until --author=<email> --pretty=%H` unioned across clones and `sort -u | wc -l`.
+- `.md`, `.csv`, `.html` agree on per-day commits/hours/sessions.
+- Open the `.html` mentally: `DATA` is valid JSON, KPIs sum correctly, off days render as flat grey bars.
+- Report the three output paths and the headline KPIs to the user.
+
+## Notes & gotchas
+- **Order matters**: write `.md` → `.csv` → `.html`. Never emit the HTML before the markdown exists.
+- **`--all` everywhere** on git log/reflog; **filter by author**; **dedup by hash**.
+- **UTC → tz** for Claude/Codex/GitHub/Linear stamps before day-bucketing; git `%aI` is already offset-aware.
+- Be honest about data quality in the methodology + footnote (e.g. ranges with commits but no agent
+  logs undercount active hours — say so).
+- Skip missing repos/worktrees with a warning; never abort the whole run for one bad path.
