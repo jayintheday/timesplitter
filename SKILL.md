@@ -20,8 +20,9 @@ evidence, then produce three internally-consistent files:
 1. a **markdown worklog** (`.md`) — the human-readable source of truth (written **first**),
 2. a flat **`.csv`** (one row per day),
 3. an interactive **`.html`** dashboard styled with **shadcn/ui** (React + Tailwind + Recharts via
-   CDN; KPI cards, a shadcn-style gradient **area chart** for hours/day, weekly progress bars, and a
-   sortable detail table with ticket badges) — generated **last, after the `.md` exists**.
+   CDN; KPI cards, a shadcn-style gradient **area chart** for hours/day, weekly progress bars, a
+   sortable detail table with ticket badges, and a **light/dark theme toggle**) — generated **last,
+   after the `.md` exists**.
 
 Evidence sources: **git commits + reflog** across all clones/worktrees, **Claude Code + Codex
 session logs**, **GitHub PRs** (`gh`), and **Linear issue lifecycle** (MCP). Hours are
@@ -305,9 +306,16 @@ the head.
    This is what shadcn ships in `globals.css`; without it every border falls back to Tailwind's
    default gray (not the theme token) and the body isn't token-driven. Omitting it is the #1 reason
    it looks "off."
-4. **Dark mode is class-based** (`darkMode:['class']`), default **light**. Do **NOT** use
-   `@media (prefers-color-scheme:dark)` — that makes the file render dark on a dark-mode OS, which
-   reads as "broken." (Add a `dark` class on `<html>` only if a dark dashboard is explicitly wanted.)
+4. **Dark mode is class-based (`darkMode:['class']`) with a user-facing toggle.** Drive theme by
+   adding/removing `dark` on `<html>` — never via `@media (prefers-color-scheme:dark)` on the tokens
+   (that takes control away from the user). Three pieces, all required:
+   - an **early-init inline `<script>` in `<head>`** (before the React scripts) that sets the initial
+     `dark` class from `localStorage.theme` if set, else the system `prefers-color-scheme` — this both
+     respects the user's saved choice and avoids a flash of the wrong theme;
+   - a **shadcn `Button` (`variant="outline" size="icon"`) theme toggle** (sun/moon inline SVG, no
+     extra icon CDN) in the header that flips the `dark` class and **persists to `localStorage`**;
+   - hold the theme in React state so toggling **re-renders the chart** (its grid/axis colors are
+     `hsl(var(--token))` and must re-resolve against the new theme).
 5. **Recharts load order + deps:** `react` → `react-dom` → `prop-types` → `react-is` → `recharts` →
    `@babel/standalone`, all **pinned, via jsdelivr** (unpkg 404s on the recharts UMD path). Recharts'
    UMD externalizes `prop-types` AND `react-is`; if either global is missing the UMD factory throws
@@ -374,6 +382,10 @@ tailwind.config={darkMode:['class'],theme:{extend:{
   body{ @apply bg-background text-foreground; }
 }
 </style>
+<script>
+/* set initial theme before paint (no FOUC): explicit stored choice, else system preference */
+(function(){try{var t=localStorage.getItem('theme');var d=t?(t==='dark'):window.matchMedia('(prefers-color-scheme:dark)').matches;document.documentElement.classList.toggle('dark',d);}catch(e){}})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
@@ -404,6 +416,14 @@ const TBody=({children})=><tbody className="[&_tr:last-child]:border-0">{childre
 const TR=({className,children,...p})=><tr className={cn("border-b transition-colors hover:bg-muted/50",className)} {...p}>{children}</tr>;
 const TH=({className,children,...p})=><th className={cn("h-10 px-2 text-left align-middle font-medium text-muted-foreground select-none",className)} {...p}>{children}</th>;
 const TD=({className,children,...p})=><td className={cn("p-2 align-middle",className)} {...p}>{children}</td>;
+const Button=({variant="outline",size="icon",className,children,...p})=>{
+ const base="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
+ const v={outline:"border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground",ghost:"hover:bg-accent hover:text-accent-foreground"}[variant];
+ const s={icon:"h-9 w-9",sm:"h-8 rounded-md px-3"}[size];
+ return <button className={cn(base,v,s,className)} {...p}>{children}</button>;};
+const SunIcon=()=><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>;
+const MoonIcon=()=><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>;
+function ThemeToggle({dark,onToggle}){return <Button aria-label="Toggle light/dark theme" title="Toggle theme" onClick={onToggle}>{dark?<SunIcon/>:<MoonIcon/>}</Button>;}
 // helpers
 const toHM=d=>{if(d==null)return '–';let m=Math.round(d*60);return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');};
 const fmtUK=iso=>{const p=iso.split('-');return p[2]+'/'+p[1]+'/'+p[0];};
@@ -485,11 +505,16 @@ function DayTable(){
 }
 function Kpi({label,value}){return <Card><CardHeader className="pb-2"><CardDescription>{label}</CardDescription><CardTitle className="text-3xl tabular-nums">{value}</CardTitle></CardHeader></Card>;}
 function App(){
+ const [dark,setDark]=useState(()=>document.documentElement.classList.contains('dark'));
+ const toggle=()=>setDark(v=>{const nv=!v;document.documentElement.classList.toggle('dark',nv);try{localStorage.setItem('theme',nv?'dark':'light');}catch(e){}return nv;});
  const kpis=[['Days worked',worked.length+' of '+DATA.length],['Total hours','~'+Math.round(sum('hours'))+'h'],['Commits',sum('commits')],['PRs merged',sum('pr_m')]];
  return <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
-  <div className="space-y-1">
-   <h1 className="text-2xl font-semibold tracking-tight">{HEADING}</h1>
-   <p className="text-sm text-muted-foreground max-w-3xl">{DATE_RANGE} <b>Estimated hours</b> = how long you were active each day, from your git commits, coding-agent sessions and local git activity. A break longer than 90 minutes ends a working block; the day's hours are the blocks added up. <b>Worked</b> shows the first→last activity time.</p>
+  <div className="flex items-start justify-between gap-4">
+   <div className="space-y-1">
+    <h1 className="text-2xl font-semibold tracking-tight">{HEADING}</h1>
+    <p className="text-sm text-muted-foreground max-w-3xl">{DATE_RANGE} <b>Estimated hours</b> = how long you were active each day, from your git commits, coding-agent sessions and local git activity. A break longer than 90 minutes ends a working block; the day's hours are the blocks added up. <b>Worked</b> shows the first→last activity time.</p>
+   </div>
+   <ThemeToggle dark={dark} onToggle={toggle}/>
   </div>
   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{kpis.map(k=><Kpi key={k[0]} label={k[0]} value={k[1]}/>)}</div>
   <Card><CardHeader className="pb-2"><CardTitle className="text-base">Hours per day</CardTitle><CardDescription>{DATE_RANGE} Hover the area for a day's detail.</CardDescription></CardHeader><CardContent><HoursChart/></CardContent></Card>
@@ -515,8 +540,10 @@ ReactDOM.createRoot(_root).render(<App/>);
   confirm: no console errors; `typeof window.Recharts === 'object'`; an `h1` exists; KPI numbers sum
   correctly; `getComputedStyle(document.body).backgroundColor` is white (light default); a `.bg-card`
   border-color is the token `rgb(228, 228, 231)` (proves the base layer applied, not gray-200); the
-  chart has one bar per day and the table has one row per day. If the page is unstyled or the chart is
-  missing, the CDN scripts were blocked — say so rather than shipping a broken file.
+  area chart has a curve + gradient and the table has one row per day. Click the theme toggle and
+  confirm `<html>` gains/loses `dark`, the body bg flips (light `rgb(255,255,255)` ↔ dark
+  `rgb(9,9,11)`), and the choice persists to `localStorage.theme`. If the page is unstyled or the
+  chart is missing, the CDN scripts were blocked — say so rather than shipping a broken file.
 - Report the three output paths and the headline KPIs to the user, and note the file needs internet
   on first open (CDN scripts).
 
