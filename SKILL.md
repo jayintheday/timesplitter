@@ -1,7 +1,7 @@
 ---
-name: time-splitters
+name: timesplitter
 version: 1.0.0
-description: Forensically reconstruct a daily work log from git, coding-agent sessions, GitHub PRs and Linear, then write a markdown worklog plus a shadcn/ui-styled interactive HTML hours dashboard (and a CSV). Triggers on "/time-splitters", "reconstruct my hours", "build my timesheet/worklog".
+description: Forensically reconstruct a daily work log from git, coding-agent sessions, GitHub PRs and Linear, then write a markdown worklog plus a shadcn/ui-styled interactive HTML hours dashboard (and a CSV). Triggers on "/timesplitter", "reconstruct my hours", "build my timesheet/worklog".
 effort: medium
 allowed-tools:
   - Bash
@@ -10,9 +10,10 @@ allowed-tools:
   - Edit
   - Grep
   - Glob
+  - AskUserQuestion
 ---
 
-# /time-splitters
+# /timesplitter
 
 Reconstruct how much the user actually worked over a date range by mining **this machine** for
 evidence, then produce three internally-consistent files:
@@ -49,12 +50,16 @@ keeps the math reliable and stays fully transparent (the script is fresh and vis
 
 ## Step 0 — Resolve config, then print the plan
 
-Parse optional flags. On a **bare `/time-splitters`** resolve smart defaults, print the resolved
-plan (range / repos / output paths), then **generate without pausing**.
+Parse optional flags. On a **bare `/timesplitter`** resolve smart defaults, print the resolved
+plan (range / repos / output paths), then **proceed to the Step 1.5 pre-flight checkpoint** — which
+is interactive only on the first run (or `--reconfigure`, or when a guess is genuinely ambiguous) and
+silent on every later "catch up to now" run. Outside those cases (state exists and is unambiguous, or
+`--yes`/`--no-confirm`, or a non-interactive/headless session) it generates without pausing, exactly
+as before.
 
 | Flag | Default |
 |---|---|
-| `--from YYYY-MM-DD` | first run: `--to` minus 6 weeks. Later runs: reuse the saved `from`. |
+| `--from YYYY-MM-DD` | first run: the date of your **earliest commit by `--author`** across the discovered repos (Step 1d) — "when you started this project." Falls back to `--to` minus 6 weeks if `--author` has no commits in any discovered repo. Later runs: reuse the saved `from`. |
 | `--to YYYY-MM-DD` | **now** (today) — the timesheet always catches up to the current moment |
 | `--name <prefix>` | basename of the **anchor repo** (the cwd project — see Step 1) |
 | `--out <dir>` | `~/Desktop/<name>-timesheets/` |
@@ -64,6 +69,9 @@ plan (range / repos / output paths), then **generate without pausing**.
 | `--full` | ignore any saved state and rebuild the whole range from scratch |
 | `--since YYYY-MM-DD` | widen the incremental recompute window back to this date (refresh older days) |
 | `--no-linear` / `--linear` | force Linear off / on (default: auto-detect from the project's ticket refs — see Step 2f) |
+| `--reconfigure` | re-run the **Step 1.5** pre-flight checkpoint and overwrite the persisted config/source choices (also forces `--full` if it changes the range start or the enabled-source set — see Step 0.5) |
+| `--yes` / `--no-confirm` | skip the checkpoint entirely; use the persisted (or auto-resolved) config without prompting. For scripted/cron runs. |
+| `--list-sources` | print the detected MCP-source classification (auto / nudge / ignored) and exit, without generating anything |
 
 A `2026-05-15..2026-06-26` positional form is also accepted as `--from..--to`.
 
@@ -73,15 +81,18 @@ The covered date range is shown *inside* the documents, not in the filenames, so
 the same three files. (`--from`/`--to` adjust the range *inside* the one timesheet; they do not change
 the filenames.)
 
-Print a short block before generating — state the mode (see Step 0.5), e.g.:
+Print a short block before generating — state the mode (see Step 0.5) and the sources (see Step 1.5
+detection), e.g.:
 ```
 Resolved:  project acme  ·  author you@example.com  ·  tz Europe/London  ·  out ~/Desktop/acme-timesheets/
 Mode:      UPDATE (state found, covered through 2026-06-26 14:30)
            → recompute 2026-06-26 → now (2026-06-27 16:40); reuse 41 earlier days
+Sources:   git, reflog, claude, codex, github, linear
+Detected:  Google Calendar, Notion  — connected but not yet used as evidence
 → updating md, csv, html…
 ```
-(First run instead prints `Mode: FULL (no state) → 2026-05-16 .. now`.) Create `<out>` with
-`mkdir -p` if missing.
+(First run instead prints `Mode: FULL (no state) → 2026-05-16 .. now`.) Omit the `Detected:` line when
+no nudge-tier MCP sources are present. Create `<out>` with `mkdir -p` if missing.
 
 ---
 
@@ -89,12 +100,15 @@ Mode:      UPDATE (state found, covered through 2026-06-26 14:30)
 
 Look for the state file `<out>/.<name>-worklog.state.json`.
 
-- **No state file, or `--full`, or `--from` earlier than the saved `from`** → **FULL** run.
-  Range = `[from .. now]` (`from` = `--from` or `--to` − 6 weeks). Gather everything (Steps 1–4), then
-  write the state file. (`--from` earlier than the saved start forces FULL because that older span was
-  never gathered.)
-- **State file present** → **UPDATE** run. Read it. Reuse `from`, `author`, `tz`, repo labels, and the
-  prior `records[]`. Compute the **recompute window**:
+- **No state file, or `--full`, or `--from` earlier than the saved `from`, or a `--reconfigure` that
+  changes the range start or the enabled-source set** → **FULL** run.
+  Range = `[from .. now]` (`from` = `--from`, or on a first run, your earliest commit by `--author`
+  across the discovered repos — Step 1d — falling back to `--to` − 6 weeks if none are found). Gather
+  everything (Steps 1–4), then write the state file. (`--from` earlier than the saved start forces
+  FULL because that older span was never gathered; a changed source set forces FULL because every
+  historical day would otherwise diverge from a clean rebuild — see the parity note below.)
+- **State file present** → **UPDATE** run. Read it. Reuse `from`, `author`, `tz`, repo labels, the
+  persisted `sources` choices (Step 1.5), and the prior `records[]`. Compute the **recompute window**:
   - `window_start` = `--since` if given, else the **local date of the saved `covered_through`** (the
     last run's last day — re-finalize it, since a mid-run left it partial);
   - `window_end` = **now**.
@@ -104,7 +118,7 @@ Look for the state file `<out>/.<name>-worklog.state.json`.
 ### State file schema (`<out>/.<name>-worklog.state.json`)
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "name": "acme",
   "from": "2026-05-15",
   "covered_through": "2026-06-26T14:30:00+01:00",
@@ -112,11 +126,36 @@ Look for the state file `<out>/.<name>-worklog.state.json`.
   "author": "you@example.com",
   "tz": "Europe/London",
   "repos": [{"path": "/Users/you/code/acme", "label": "clone A"}],
+  "sources": {
+    "enabled":      ["git","reflog","claude","codex","github","linear"],
+    "detected":     ["linear","gcal","notion"],
+    "acknowledged": ["gcal","notion"],
+    "checkpoint_done": true,
+    "calendar_model": "bounded"
+  },
   "records": [ { …one enriched per-day record (Step 3 shape)… } ]
 }
 ```
 `records[]` is the durable source of truth; the `.md/.csv/.html` are rendered from it. Write it
 **after** the three files succeed (so a crash never leaves state ahead of the outputs).
+
+The `sources` object records the Step 1.5 outcome so later runs stay silent: `enabled` = the evidence
+sources this timesheet is built from (the parity contract — see below); `detected` = every relevant
+MCP server seen (Step 1.5a); `acknowledged` = nudge-tier servers the user has already been shown (so
+the checkpoint isn't repeated); `checkpoint_done` = the checkpoint has run at least once;
+`calendar_model` = the recorded model for *when* Calendar is eventually wired (`"bounded"`, see
+CLAUDE.md — not used as evidence yet this release).
+
+**Back-compat load.** A `schema: 1` file (no `sources`) loads normally: infer `enabled` from which
+columns are non-zero across `records[]`, set `acknowledged = []` and `checkpoint_done = true`, and
+**migrate it to `schema: 2` on the next write**. An old timesheet therefore keeps updating silently —
+it never re-prompts and never spuriously forces FULL.
+
+**Parity contract.** The FULL == UPDATE invariant holds only for a *fixed* config. Because UPDATE
+reuses the persisted `from`/`author`/`tz`/`repos`/`sources.enabled` verbatim, parity is preserved. The
+only way to change the enabled-source set (or move the range start earlier) is `--reconfigure` /
+`--full` / `--from`, each of which forces a FULL rebuild — so a changed source set can never leave
+historical days computed under a different source set than the trailing edge.
 
 ---
 
@@ -165,9 +204,99 @@ project (its basename → `--name`). Print which project was chosen so the user 
 > `~/Downloads/qorum-meeting-flow-dev` — plus their worktrees under `~/conductor/...` and
 > `.claude/worktrees/`. Hash-dedup across the two object DBs = 261 commits.
 
+### 1d. Resolve the first-run default `--from`
+Only matters when `--from` wasn't given and no state file exists yet (i.e. Step 0's default is about
+to be used). Once the repo set is known (1a–1c), run a cheap, unbounded pass per discovered repo:
+```bash
+git -C <repopath> log --all --author="<email>" --reverse --pretty=format:'%aI' | head -1
+```
+Take the **earliest** date across all discovered repos — that's "when you started this project," and
+becomes the default `--from`. If `--author` has zero commits in every discovered repo (e.g. an old
+identity/email mismatch), fall back to `--to` minus 6 weeks instead. Deliberately do **not** fall back
+to "the repo's first commit by anyone" — on a shared codebase you joined long after it started, that
+would silently pull in years of other people's history.
+
+---
+
+## Step 1.5 — Pre-flight checkpoint (detect sources, confirm config)
+
+Runs **after** repo discovery (so the discovered repos can be shown) and **before** any evidence is
+gathered. Two parts: **detect**, then **confirm-or-proceed**.
+
+### 1.5a — Detect connected MCP evidence sources
+Scan **your own visible tool names** for the `mcp__<server>__<tool>` pattern and collect the distinct
+`<server>` segments. This is the detection mechanism — it reads the in-context tool list, makes no
+network call, and needs no extra permission. (You may cross-check with `claude mcp list`.) Classify
+each detected server against the **evidence-source registry** (Step 2 preamble):
+- **auto-tier** — reliably project-scopable, so safe to use without asking (issue trackers via the
+  ticket-prefix gate, GitHub via remote match). **Linear is the only one *wired* this release.**
+- **nudge-tier** — only fuzzy/personal scope (Calendar, Notion, Slack, Gmail, Drive). **Detected and
+  mentioned, never used as evidence yet** — this release is *detect-and-nudge only*.
+- **ignored** — the deny-list (Spotify, Canva, Gamma, Stripe, Vercel, Supabase, lottiefiles,
+  claude-in-chrome, …). Never mentioned, so the nudge stays gentle.
+
+If `--list-sources` was passed: print the three buckets and **exit** without generating anything.
+
+### 1.5b — Confirm or proceed
+Decide whether to run the interactive checkpoint:
+- **Run it** when **no state file** (first run) **OR** `--reconfigure` **OR** a guess is genuinely
+  ambiguous (Step 1c had to pick among several clusters; git `user.email` was unresolvable) — *and*
+  the session is interactive *and* neither `--yes` nor `--no-confirm` was given.
+- **Skip it** (reuse the persisted/auto config, print the Step 0 plan block, proceed — today's
+  behavior) when state exists and is unambiguous, **OR** `--yes`/`--no-confirm`, **OR** the run is
+  non-interactive/headless. A skipped checkpoint never blocks.
+
+When it runs, ask a **short** confirmation with `AskUserQuestion` (two questions — not a wizard):
+
+1. **Config.** Present the resolved `project` (+ the discovered repos/clones and worktrees), `author`,
+   `tz`, date `range`, `out` dir, and `mode`. Options: **Proceed** · **Change project/repos** ·
+   **Change author/timezone** · **Change date range**. A "change" answer triggers one targeted
+   follow-up (pick among the discovered clusters, or take a free-text email / tz / `from..to`), then
+   re-resolve and continue.
+2. **Sources.** Show the sources that will be used (git + reflog + Claude/Codex sessions + GitHub PRs
+   + Linear — each still subject to its own optional-source logic in Step 2) for confirm/toggle, and —
+   if any nudge-tier servers were detected — list them as an informational nudge ("Also detected:
+   Google Calendar, Notion — connected, but not yet used as evidence"). Since this release is
+   detect-and-nudge only, this part is informational; record which nudge-tier servers were shown so
+   the prompt isn't repeated.
+
+Persist the outcome to `state.sources` (Step 0.5): `enabled` from the confirmed source toggles,
+`detected`/`acknowledged` from 1.5a, `checkpoint_done = true`. If the confirmed config changed the
+range start or the enabled-source set, switch to a **FULL** run (Step 0.5 parity contract). Then print
+the Step 0 plan block and continue to Step 2.
+
 ---
 
 ## Step 2 — Gather evidence
+
+### Evidence-source registry
+Every evidence source is one row of this registry. The framing generalizes the Linear lesson
+(landmine #10: a *workspace-wide* source injects noise unless it can be **scoped to the project**),
+sorting each source into a tier that decides whether it is used automatically, merely nudged about, or
+ignored. **This release wires only the rows marked ✅; the rest are the integration contract for later
+— detected and nudged about in Step 1.5, not gathered.**
+
+| id | recognize (server segment, case-insensitive) | tier | project scope | maps to (point-event model) | wired? |
+|---|---|---|---|---|---|
+| `git` | local | required | author + remote-cluster | commit `%aI` → point | ✅ 2a |
+| `reflog` | local | auto | clone object DBs | reflog entry time → point | ✅ 2b |
+| `claude` | local | auto | `cwd` ∈ repos | per-message `timestamp` → point | ✅ 2c |
+| `codex` | local | auto | `payload.cwd` ∈ repos | per-message `timestamp` → point | ✅ 2d |
+| `github` | `gh` CLI | auto | `repository.nameWithOwner` ∈ remotes | PR `createdAt`/`closedAt` → point | ✅ 2e |
+| `linear` | `linear` | auto | **ticket-prefix gate** `[A-Z]{2,}-\d+` | issue lifecycle stamps + comments → point | ✅ 2f |
+| `jira` | `jira` / `atlassian` | auto | **same prefix gate** (Jira keys are `[A-Z]+-\d+` too) | issue transitions + comments → point | ⬜ reuses 2f |
+| `gcal` | `calendar` | nudge | fuzzy: title/attendees/desc vs project, repos, ticket prefixes | meeting → **bounded interval** (decided model — CLAUDE.md) | ⬜ |
+| `notion` | `notion` | nudge | fuzzy: title/ticket refs / editor = author | page `last_edited_time`, comments → point | ⬜ |
+| `slack` | `slack` | nudge | fuzzy: channels matching project | message → point | ⬜ |
+| `gmail` / `drive` | `gmail` / `drive` | nudge | very fuzzy | message / file-edit time → point | ⬜ |
+| _other_ | any other `mcp__*` with a dated `list_*` / `search_*` read tool | mention-only | unscoped | one point per dated item | ⬜ |
+| _ignore_ | spotify, canva, gamma, stripe, vercel, supabase, lottiefiles, claude-in-chrome | ignored | — | — | never |
+
+Two rules embedded here:
+- **GitHub MCP is a provider-swap, not a new source.** If a `github`-segment MCP server is present but
+  the `gh` CLI is not, it may stand in for 2e — but **never run both** (that double-counts PRs).
+- **Issue trackers share one mechanism.** Linear and Jira both key off `[A-Z]{2,}-\d+`, so a future
+  Jira row is just another server loop inside 2f's prefix gate — no new concept.
 
 **Convert every timestamp from UTC (or its stored offset) to `--tz` before bucketing into a calendar
 day.** All four sources below stamp in UTC except git, which gives an offset-aware time via `%aI`.
@@ -233,9 +362,12 @@ gh search prs --author=@me --created=<from>..<to> \
 - If `gh` is not installed/authed, or the project has no PRs → all PR counts are 0. **Not an error** —
   treat GitHub as an absent source (see "Optional sources" below).
 
-### 2f. Linear (MCP) — optional, auto-detected, project-scoped
-Linear is **workspace-wide**, so for a project that doesn't use Linear it would inject unrelated
-noise. Decide whether Linear applies, per run:
+### 2f. Linear (MCP) — the wired issue-tracker row
+Linear is the auto-tier **issue-tracker** row of the registry above, and the only wired MCP source
+this release. Like any workspace-wide source it would inject unrelated noise for a project that
+doesn't use it, so it is **project-scoped by the ticket-prefix gate**. That same gate generalizes to
+other issue trackers (e.g. Jira, whose keys are also `[A-Z]{2,}-\d+`): wiring one would be another
+server loop here, not a new mechanism. Decide whether Linear applies, per run:
 
 1. **`--no-linear`** → skip entirely.
 2. **`--linear`** → force-enable.
@@ -267,7 +399,11 @@ outputs to only what was present:
 - the `.md` **day headlines** omit a segment for any globally-absent source (e.g. drop `· N Linear`
   when there is no Linear, drop `· NPR↑/NPR↓` when there are no PRs);
 - add a one-line **footnote** noting what was unavailable (e.g. "This project isn't tracked in Linear,
-  so estimates rest on git commits, agent sessions and PRs.").
+  so estimates rest on git commits, agent sessions and PRs."). **Also append the detect-and-nudge
+  line** when nudge-tier MCP servers were detected (Step 1.5a) but aren't yet used as evidence — e.g.
+  "Google Calendar and Notion are connected but not yet used as evidence." This persists the nudge in
+  the artifact itself (the `.md` footnote and, since it mirrors the `.md`, the HTML `{{FOOTNOTE}}`
+  token), so it survives across runs without re-prompting.
 A missing/failed source is a warning, never an abort.
 
 ---
@@ -401,7 +537,7 @@ Take the template below and substitute exactly five tokens:
 
 | Token | Where | Fill with |
 |---|---|---|
-| `{{TITLE}}` | `<title>` | e.g. `Musta — hours worked` (HTML-escape) |
+| `{{TITLE}}` | `<title>` | e.g. `Musta` — just the project name (HTML-escape) |
 | `{{HEADING}}` | `#root data-title` | same as title (HTML-attr-escape `"` → `&quot;`) |
 | `{{DATE_RANGE}}` | `#root data-range` | e.g. `15 May – 26 Jun 2026.` (HTML-attr-escape) |
 | `{{FOOTNOTE}}` | `#root data-foot` | the caveat line, mirroring the `.md` note (HTML-attr-escape) |
@@ -571,7 +707,7 @@ function ChartTip({active,payload}){
  if(!active||!payload||!payload.length)return null;const d=payload[0].payload;
  const rows=d.off?[]:[['Hours',d.hours+'h'],['Commits',d.commits],['Sessions',d.sessions]];
  return <div className="grid min-w-[9rem] items-start gap-1.5 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-xl">
-  <div className="font-medium">{d.dow} {fmtUK(d.date)}{d.off?' · day off':''}</div>
+  <div className="font-medium">{d.dow} {fmtUK(d.date)}{d.off?' · Inactive':''}</div>
   {d.off?null:<div className="grid gap-1.5">
    {rows.map(([k,v],i)=>(
     <div key={k} className="flex w-full items-center gap-2">
@@ -589,7 +725,7 @@ function HoursChart(){
  const data=DATA.map(d=>({...d,label:fmtUK(d.date).slice(0,5)}));
  return <ChartContainer className="h-[250px]" style={{['--color-hours']:'hsl(var(--chart-1))'}}>
   <R.ResponsiveContainer width="100%" height="100%">
-   <R.AreaChart data={data} margin={{top:10,right:12,left:-12,bottom:0}}>
+   <R.AreaChart data={data} margin={{top:10,right:12,left:0,bottom:0}}>
     <defs>
      <linearGradient id="fillHours" x1="0" y1="0" x2="0" y2="1">
       <stop offset="5%" stopColor="var(--color-hours)" stopOpacity={0.8}/>
@@ -608,13 +744,21 @@ function HoursChart(){
 function Weeks(){
  const weeks=useMemo(()=>{const wk={};DATA.forEach(d=>{const k=mondayOf(d.date);(wk[k]=wk[k]||{key:k,h:0,c:0,days:0});wk[k].h+=d.hours;wk[k].c+=d.commits;if(!d.off)wk[k].days++;});return Object.values(wk).sort((a,b)=>a.key.localeCompare(b.key));},[]);
  const mx=Math.max(...weeks.map(w=>w.h),1);
+ const totalH=weeks.reduce((a,w)=>a+w.h,0), totalDays=weeks.reduce((a,w)=>a+w.days,0), totalC=weeks.reduce((a,w)=>a+w.c,0);
  return <div className="space-y-3">{weeks.map((w,i)=>
   <div key={i} className="flex items-center gap-3">
    <div className="w-28 shrink-0 text-sm"><span className="font-medium">Week {i+1}</span> <span className="text-muted-foreground text-xs">{fmtUK(w.key)}</span></div>
    <div className="flex-1 h-2.5 rounded-full bg-muted overflow-hidden"><div className="h-full rounded-full bg-[hsl(var(--chart-1))]" style={{width:Math.round(w.h/mx*100)+'%'}}/></div>
    <div className="w-12 text-right text-sm font-medium tabular-nums">{Math.round(w.h)}h</div>
    <div className="w-32 text-right text-xs text-muted-foreground tabular-nums">{w.days} days · {w.c} commits</div>
-  </div>)}</div>;
+  </div>)}
+  <div className="flex items-center gap-3 pt-3 border-t border-border">
+   <div className="w-28 shrink-0 text-sm font-medium">Total</div>
+   <div className="flex-1"/>
+   <div className="w-12 text-right text-sm font-semibold tabular-nums">{Math.round(totalH)}h</div>
+   <div className="w-32 text-right text-xs text-muted-foreground tabular-nums">{totalDays} days · {totalC} commits</div>
+  </div>
+ </div>;
 }
 function DayTable(){
  const cols=[{k:'date',l:'Date'},{k:'dow',l:'Day'},{k:'win',l:'Worked'},{k:'hours',l:'Hours',num:1},{k:'commits',l:'Commits',num:1},{k:'sessions',l:'Sessions',num:1},{k:'what',l:'What you worked on'}];
@@ -623,26 +767,29 @@ function DayTable(){
  const rows=useMemo(()=>[...DATA].sort((a,b)=>{let x=val(a,sort.k),y=val(b,sort.k);if(typeof x==='string')return sort.dir*x.localeCompare(y);return sort.dir*((x||0)-(y||0));}),[sort]);
  const click=k=>setSort(s=>s.k===k?{k,dir:-s.dir}:{k,dir:1});
  return <Table><THead><TR className="hover:bg-transparent">{cols.map(c=>
-   <TH key={c.k} className={cn("cursor-pointer",c.num&&"text-right")} onClick={()=>click(c.k)}>{c.l}{sort.k===c.k?(sort.dir>0?' ↑':' ↓'):''}</TH>)}</TR></THead>
+   <TH key={c.k} className={cn("cursor-pointer",c.num&&"text-right",c.k==='win'&&"w-28")} onClick={()=>click(c.k)}>{c.l}{sort.k===c.k?(sort.dir>0?' ↑':' ↓'):''}</TH>)}</TR></THead>
   <TBody>{rows.map(d=>
    <TR key={d.date} className={d.off?"text-muted-foreground":""}>
     <TD>{fmtUK(d.date)}</TD><TD>{d.dow}</TD><TD className="tabular-nums">{win(d)}</TD>
     <TD className="text-right tabular-nums">{d.off?'—':d.hours.toFixed(1)}</TD>
     <TD className="text-right tabular-nums">{d.commits||''}</TD>
     <TD className="text-right tabular-nums">{d.sessions||''}</TD>
-    <TD className="text-muted-foreground"><span>{d.what||(d.off?'day off':'')}</span>{d.tickets&&d.tickets.length?<span className="ml-1 inline-flex flex-wrap gap-1 align-middle">{d.tickets.map(t=><Badge key={t} variant="outline">{t}</Badge>)}</span>:null}</TD>
+    <TD className="text-muted-foreground"><span>{d.what||(d.off?'Inactive':'')}</span>{d.tickets&&d.tickets.length?<span className="ml-1 inline-flex flex-wrap gap-1 align-middle">{d.tickets.map(t=><Badge key={t} variant="outline">{t}</Badge>)}</span>:null}</TD>
    </TR>)}</TBody></Table>;
 }
 function Kpi({label,value}){return <Card><CardHeader className="pb-2"><CardDescription>{label}</CardDescription><CardTitle className="text-3xl tabular-nums">{value}</CardTitle></CardHeader></Card>;}
 function App(){
  const [dark,setDark]=useState(()=>document.documentElement.classList.contains('dark'));
  const toggle=()=>setDark(v=>{const nv=!v;document.documentElement.classList.toggle('dark',nv);try{localStorage.setItem('theme',nv?'dark':'light');}catch(e){}return nv;});
- const kpis=[['Days worked',worked.length+' of '+DATA.length],['Total hours','~'+Math.round(sum('hours'))+'h'],['Commits',sum('commits')],['PRs merged',sum('pr_m')]];
- return <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
+ const kpis=[['Days active',worked.length+' of '+DATA.length],['Total hours','~'+Math.round(sum('hours'))+'h'],['Commits',sum('commits')],['PRs merged',sum('pr_m')]];
+ return <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
   <div className="flex items-start justify-between gap-4">
    <div className="space-y-1">
     <h1 className="text-2xl font-semibold tracking-tight">{HEADING}</h1>
-    <p className="text-sm text-muted-foreground max-w-3xl">{DATE_RANGE} <b>Estimated hours</b> = how long you were active each day, from your git commits, coding-agent sessions and local git activity. A break longer than 90 minutes ends a working block; the day's hours are the blocks added up. <b>Worked</b> shows the first→last activity time.</p>
+    <div className="space-y-1 text-sm text-muted-foreground">
+     <p>{DATE_RANGE}</p>
+     <p><b>Estimated hours</b> = how long you were active each day, from your git commits, coding-agent sessions and local git activity.</p>
+    </div>
    </div>
    <ThemeToggle dark={dark} onToggle={toggle}/>
   </div>
@@ -650,7 +797,7 @@ function App(){
   <Card><CardHeader className="pb-2"><CardTitle className="text-base">Hours per day</CardTitle><CardDescription>{DATE_RANGE} Hover the area for a day's detail.</CardDescription></CardHeader><CardContent><HoursChart/></CardContent></Card>
   <Card><CardHeader className="pb-2"><CardTitle className="text-base">By week</CardTitle></CardHeader><CardContent><Weeks/></CardContent></Card>
   <Card><CardHeader className="pb-2"><CardTitle className="text-base">Every day</CardTitle><CardDescription>Click a column header to sort.</CardDescription></CardHeader><CardContent><DayTable/></CardContent></Card>
-  <p className="text-xs text-muted-foreground max-w-3xl">{FOOTNOTE}</p>
+  <p className="text-xs text-muted-foreground">{FOOTNOTE}</p>
  </div>;
 }
 ReactDOM.createRoot(_root).render(<App/>);

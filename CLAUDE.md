@@ -10,6 +10,9 @@ clones/worktrees, Claude + Codex session logs, GitHub PRs, Linear) and emits, in
 `.md` (source-of-truth worklog) → `.csv` (18 cols) → `.html` (shadcn/ui dashboard) → hidden
 `.state.json`. It was reverse-engineered from a hand-made output the user liked
 (`~/Desktop/musta-timesheets/musta-worklog-2026-05-15_to_2026-06-26.*` — the reference artifacts).
+Before gathering, a first-run-only **pre-flight checkpoint** (Step 1.5) confirms the guessed config and
+**detects other connected MCP servers** (Calendar, Notion, …) it could use, nudging the user about
+them — see the decisions and landmine #11 below.
 
 ## Decisions made WITH the user (don't silently reverse these)
 - **Pure instructions, no bundled helper script.** The skill tells the model to write a throwaway
@@ -23,6 +26,44 @@ clones/worktrees, Claude + Codex session logs, GitHub PRs, Linear) and emits, in
 - **shadcn/ui dashboard as a single self-contained CDN file** (not a real shadcn project). Needs
   internet on first open. The "real shadcn project" path was explicitly declined.
 - **Light/dark toggle**, default = system preference, choice persisted.
+- **Pre-flight checkpoint (Step 1.5), first run only.** The skill used to guess everything and run
+  without checking in. Now, on the first run (or `--reconfigure`, or a genuinely ambiguous guess) it
+  pauses *once* with an interactive multiple-choice confirmation (`AskUserQuestion`) of the resolved
+  config + sources, persists the answers to state, and stays silent on every later "catch up to now"
+  run. `--yes`/`--no-confirm` and non-interactive/headless runs skip it (back to the old auto-proceed
+  behavior). This is the **only** place the skill ever blocks for input — keep it first-run-only so
+  daily top-ups stay fast and scriptable.
+- **MCP detection = scan visible `mcp__*` tool namespaces.** Detection reads the in-context tool list
+  (optionally cross-checks `claude mcp list`); no network call, no extra permission. Servers are
+  classified by an evidence-source registry (Step 2 preamble) into **auto-tier** (project-scopable,
+  used automatically — issue trackers via the prefix gate, GitHub via remote match), **nudge-tier**
+  (fuzzy/personal scope — Calendar/Notion/Slack/Gmail/Drive, mentioned not used), and an **ignore
+  deny-list** (Spotify/Canva/Vercel/Supabase/… — never mentioned, so the nudge stays gentle).
+- **Detect-and-nudge only (this release).** Linear stays the only *wired* MCP source. Other detected
+  servers are surfaced (plan block + checkpoint + persistent artifact footnote), not gathered. Wiring
+  their data-pull is a deliberate follow-up.
+- **First-run default `--from` = "when you started this project," not a fixed 6-week window.**
+  Originally defaulted to `--to` minus 6 weeks — leftover from building the skill against a single
+  project (Musta) that was already recent, so a 6-week window and "since I started" looked identical
+  and the gap never surfaced. Caught testing against `isleofculture` (real first commit 2026-01-29):
+  the 6-week default silently dropped ~4 months and 33 commits with zero indication anything was
+  missing. Now Step 1d runs a cheap unbounded `git log --author --reverse` pass per discovered repo
+  (after repo discovery, before Step 2's bounded gather) and takes the earliest date across them as
+  `--from`. Falls back to the old 6-week default **only** if `--author` has zero commits in every
+  discovered repo — deliberately not "the repo's first commit by anyone," which would be wrong on a
+  shared codebase joined long after it started. The Step 1.5 checkpoint still shows the resolved range
+  before anything runs, so a huge computed range is visible and overridable on first run. Later runs
+  are unaffected — `from` is persisted in state and reused verbatim regardless of how it was derived
+  (landmine #11's parity contract).
+
+## Decided, not yet built
+- **Calendar = bounded interval → real hours** (the model for *when* Calendar is eventually wired).
+  Each accepted, single-day, non-all-day meeting becomes a real `[start,end]` block, clipped to the
+  day and capped per-event, merged into active hours alongside the padded points. This is NOT the
+  landmine-#8 failure: #8 was an *unbounded* span (a session left open overnight = 45h); a meeting is
+  a *short, trusted, bounded* interval still clipped to `[day0,day1]`, so the "no day > 24h" invariant
+  holds. Required exclusions: all-day events, multi-day events, `declined` responses; cap any single
+  event (e.g. ≤ 8h). Recorded in `state.sources.calendar_model = "bounded"`.
 
 ## Landmines (each of these was a real bug — keep them fixed)
 1. **Tailwind = v3 Play CDN, pinned `cdn.tailwindcss.com/3.4.17`.** The Play CDN serves **v3**, where
@@ -59,12 +100,22 @@ clones/worktrees, Claude + Codex session logs, GitHub PRs, Linear) and emits, in
     prefixes from `[A-Z]{2,}-\d+` in commits/branches: none → skip Linear entirely; some → query but
     keep only matching-prefix issues. `--no-linear`/`--linear` override. Every source except git is
     optional; outputs list only sources that contributed.
+11. **The persisted config + enabled-source set is part of the parity contract.** `state.sources.enabled`
+    (and `from`/`author`/`tz`/`repos`) is reused verbatim on UPDATE — that's what keeps FULL == UPDATE.
+    Changing it (via `--reconfigure`, `--full`, or an earlier `--from`) MUST force a FULL rebuild;
+    otherwise historical days would have been computed under a different config than the trailing edge
+    and parity breaks. Back-compat: a `schema:1` state file (no `sources`) loads by inferring `enabled`
+    from non-zero columns and treating the checkpoint as already done — it must never re-prompt or
+    spuriously force FULL.
 
 ## Why incremental is correct
 Every signal is bucketed by its **own event timestamp**, so a day, once computed, never changes —
 only the trailing edge can (and the last day of a prior run may be partial). So UPDATE recomputes
 `[last covered day .. now]`, replaces those day-records, reuses everything earlier. An UPDATE result
-must equal a `--full` rebuild of the same range (the parity check).
+must equal a `--full` rebuild of the same range (the parity check) — **given a fixed config**. The
+config (range start + enabled-source set) lives in state and is reused verbatim; the only ways to
+change it (`--reconfigure`/`--full`/`--from`) force FULL, so parity is never silently violated
+(landmine #11).
 
 ## How this was verified (do the same after changes)
 - **Render-verify in a real browser** (gstack `/browse`, `goto file://…`): no console errors,
@@ -74,6 +125,16 @@ must equal a `--full` rebuild of the same range (the parity check).
   (Verified: 0 mismatches; totals 261 commits / 64-62 PRs / 94 sessions / 187 Linear / ~120h.)
 - **Multi-project**: ran live against `isleofculture` (non-Linear) — Linear auto-skipped, dashboard
   clean; this is where landmine #8 was found and fixed.
+- **Pre-flight checkpoint**: first run (no state) prompts once and persists `state.sources` with
+  `checkpoint_done:true`; a second run does NOT prompt and reuses the persisted config; `--reconfigure`
+  re-prompts and a changed range/source-set flips the run to FULL; `--yes`/headless never prompts and
+  output is identical to the pre-checkpoint skill for the same config.
+- **Back-compat**: an old `schema:1` state file updates silently (no prompt, no spurious FULL) and
+  migrates to `schema:2` on write.
+- **Detection + nudge**: with extra MCPs connected, nudge-tier servers (Calendar/Notion) appear in the
+  `Detected:` plan line, the checkpoint, and the artifact footnote; deny-list servers
+  (Spotify/Canva/Vercel/Supabase/…) are NOT mentioned; `--list-sources` prints the classification and
+  exits without generating.
 
 ## Verified evidence-source locations (this machine)
 - Claude sessions: `~/.claude/projects/<flattened-cwd>/<uuid>.jsonl`; per-line top-level `timestamp`
@@ -89,8 +150,10 @@ must equal a `--full` rebuild of the same range (the parity check).
 ## Repo / install status
 - This skill lives in `~/Desktop/skill development/` alongside `dashkit`, `squeaky-bum-time`,
   `thrill-me` (the user's skill-dev folder; each is its own git repo). It is the source of truth.
-- It is **not** symlinked into `~/.claude/skills/`, so `/time-splitters` won't autocomplete until it
-  is. To enable: `ln -s "$HOME/Desktop/skill development/time-splitters" "$HOME/.claude/skills/time-splitters"`.
+- Invocable as `/timesplitter` (frontmatter `name:` in `SKILL.md`) — deliberately not `/time-splitters`,
+  to match the repo's dev-folder name but not the invocation command. Symlinked into
+  `~/.claude/skills/timesplitter` → `~/Desktop/skill development/time-splitters` (the dev folder itself
+  keeps its original name; only the symlink's name is the trigger).
 - No git remote yet (sibling `dashkit` is pushed to `github.com/jayintheday/dashkit`). The runtime
   test harness lived in the session scratchpad (ephemeral) — not committed here by design.
 
