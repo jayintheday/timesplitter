@@ -1,0 +1,5 @@
+# macOS Finder metadata — never commit
+.DS_Store
+
+# gstack/browse daemon session state (tokens, PIDs, logs) — never commit
+.gstack/

@@ -9,7 +9,7 @@ Reconstructs a personal work log from local forensic evidence (git commits+reflo
 clones/worktrees, Claude + Codex session logs, GitHub PRs, Linear) and emits, in this order:
 `.md` (source-of-truth worklog) → `.csv` (18 cols) → `.html` (shadcn/ui dashboard) → hidden
 `.state.json`. It was reverse-engineered from a hand-made output the user liked
-(`~/Desktop/musta-timesheets/musta-worklog-2026-05-15_to_2026-06-26.*` — the reference artifacts).
+(a personal reference timesheet from an earlier internal project — names anonymized in this doc).
 Before gathering, a first-run-only **pre-flight checkpoint** (Step 1.5) confirms the guessed config and
 **detects other connected MCP servers** (Calendar, Notion, …) it could use, nudging the user about
 them — see the decisions and landmine #11 below.
@@ -19,7 +19,7 @@ them — see the decisions and landmine #11 below.
   Python script into the scratchpad at runtime. Rationale: transparency + fresh each run. (So there is
   intentionally no `.py` in this repo.)
 - **Reusable + smart defaults**, anchored on the **current project** (cwd repo); sibling clones found
-  by shared remote. Not hard-coded to the original "musta"/qorum project.
+  by shared remote. Not hard-coded to the original reference project it was built against.
 - **One evolving timesheet**: stable filenames (`<name>-worklog.{md,csv,html}`) updated in place, with
   a hidden `.<name>-worklog.state.json` as durable state. Range lives *inside* the docs.
 - **Catch up to now on every run** (incremental): re-fetch only the trailing edge; `--full` rebuilds.
@@ -57,7 +57,7 @@ them — see the decisions and landmine #11 below.
   their data-pull is a deliberate follow-up.
 - **First-run default `--from` = "when you started this project," not a fixed 6-week window.**
   Originally defaulted to `--to` minus 6 weeks — leftover from building the skill against a single
-  project (Musta) that was already recent, so a 6-week window and "since I started" looked identical
+  reference project that was already recent, so a 6-week window and "since I started" looked identical
   and the gap never surfaced. Caught testing against `isleofculture` (real first commit 2026-01-29):
   the 6-week default silently dropped ~4 months and 33 commits with zero indication anything was
   missing. Now Step 1d runs a cheap unbounded `git log --author --reverse` pass per discovered repo
@@ -168,8 +168,8 @@ change it (`--reconfigure`/`--full`/`--from`) force FULL, so parity is never sil
 - GitHub: `gh` (jsonfields incl. `createdAt`,`closedAt`,`state`,`repository`). Scope to the project's
   repo; use `--created` + `--merged-at` for the incremental window.
 - Linear: MCP `mcp__linear__list_users` / `list_issues` (assignee=me, `updatedAt` window).
-- Reference machine repos: musta = two clones of `…/qorum-meeting-flow` under `~/Downloads/` (+ a fork
-  `…/qorum-local`) with worktrees in `~/conductor/...` and `.claude/worktrees/`.
+- Reference machine repos: the original test project = two clones of an internal app repo under
+  `~/Downloads/` (+ a personal fork) with worktrees in `~/conductor/...` and `.claude/worktrees/`.
 
 ## Repo / install status
 - This skill lives in `~/Desktop/skill development/` alongside `dashkit`, `squeaky-bum-time`,
@@ -186,5 +186,6 @@ change it (`--reconfigure`/`--full`/`--from`) force FULL, so parity is never sil
   path (declined so far).
 - Linear per-day count is a lifecycle-stamp proxy (created/started/completed/canceled), not full
   issue history — under-counts very busy Linear days.
-- The original `~/Desktop/musta-timesheets-shadcn/` export predates landmine #8's fix, so its hours
-  are slightly inflated vs the current model; regenerate if you want both projects on identical logic.
+- The very first hand-made export (that this skill was reverse-engineered from) predates landmine
+  #8's fix, so its hours are slightly inflated vs the current model; regenerate if you want it on
+  identical logic to a fresh run.

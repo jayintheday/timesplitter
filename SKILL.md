@@ -65,7 +65,7 @@ as before.
 | `--name <prefix>` | basename of the **anchor repo** (the cwd project — see Step 1) |
 | `--out <dir>` | `~/Desktop/<name>-timesheets/` |
 | `--repo <path>` (repeatable) | autodiscover from the anchor repo — see Step 1 |
-| `--author <email>` | git `user.email`; falls back to `me@vijay-patel.co.uk` |
+| `--author <email>` | git `user.email`; if unset, resolved interactively at the Step 1.5 checkpoint (errors clearly in non-interactive/headless runs) |
 | `--tz` | `Europe/London` |
 | `--full` | ignore any saved state and rebuild the whole range from scratch |
 | `--since YYYY-MM-DD` | widen the incremental recompute window back to this date (refresh older days) |
@@ -200,9 +200,9 @@ by shared remote, and pick the cluster with the **most commits by `--author` in 
 project (its basename → `--name`). Print which project was chosen so the user can re-run with
 `--repo`/`--name` if it guessed wrong.
 
-> Reference run (the Musta project) for sanity only: anchor remote `org/qorum-meeting-flow` matched
-> two clones — `~/Downloads/qorum-meeting-flow` (also forks `…/qorum-local`) and
-> `~/Downloads/qorum-meeting-flow-dev` — plus their worktrees under `~/conductor/...` and
+> Reference run (an internal test project, names anonymized here) for sanity only: anchor remote
+> `org/example-app` matched two clones — `~/Downloads/example-app` (also forks `…/example-app-fork`)
+> and `~/Downloads/example-app-dev` — plus their worktrees under `~/conductor/...` and
 > `.claude/worktrees/`. Hash-dedup across the two object DBs = 261 commits.
 
 ### 1d. Resolve the first-run default `--from`
@@ -538,7 +538,7 @@ Take the template below and substitute exactly five tokens:
 
 | Token | Where | Fill with |
 |---|---|---|
-| `{{TITLE}}` | `<title>` | e.g. `Musta` — just the project name (HTML-escape) |
+| `{{TITLE}}` | `<title>` | e.g. `Acme` — just the project name (HTML-escape) |
 | `{{HEADING}}` | `#root data-title` | same as title (HTML-attr-escape `"` → `&quot;`) |
 | `{{DATE_RANGE}}` | `#root data-range` | e.g. `15 May – 26 Jun 2026.` (HTML-attr-escape) |
 | `{{FOOTNOTE}}` | `#root data-foot` | the caveat line, mirroring the `.md` note (HTML-attr-escape) |
