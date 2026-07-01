@@ -26,6 +26,19 @@ them — see the decisions and landmine #11 below.
 - **shadcn/ui dashboard as a single self-contained CDN file** (not a real shadcn project). Needs
   internet on first open. The "real shadcn project" path was explicitly declined.
 - **Light/dark toggle**, default = system preference, choice persisted.
+- **Period toggle (7d/14d/30d/All) on the HTML dashboard**, added because a long project's chart
+  degenerates into a long flat line with a few unreadable spikes (real example: `isleofculture`,
+  ~150 days in range but only 21 active). `DATA` is one record per calendar day in order, so "last N
+  days" is `DATA.slice(-N)` — no date math. It's a *global* filter: KPIs, chart, weekly bars and the
+  day table all recompute from the same filtered slice, not just the chart, so the numbers stay
+  internally consistent as you switch periods. Default is `"all"` (matches pre-feature behavior; a
+  first load never silently hides history) and the choice persists to `localStorage.period`, mirroring
+  the theme toggle. See landmine #12 for the chart-scaling bug this required fixing. **Placement:** it
+  sits in the "Hours per day" card's own header, directly above the chart it scopes — not in the top
+  masthead next to the theme toggle. The user moved it there after the first pass put it up top;
+  visually anchoring the control to the thing it visibly changes (the graph) reads better than a
+  global-feeling toggle floating next to dark/light mode. It still scopes the KPIs/weekly/table too,
+  only its position moved.
 - **Pre-flight checkpoint (Step 1.5), first run only.** The skill used to guess everything and run
   without checking in. Now, on the first run (or `--reconfigure`, or a genuinely ambiguous guess) it
   pauses *once* with an interactive multiple-choice confirmation (`AskUserQuestion`) of the resolved
@@ -107,6 +120,13 @@ them — see the decisions and landmine #11 below.
     and parity breaks. Back-compat: a `schema:1` state file (no `sources`) loads by inferring `enabled`
     from non-zero columns and treating the checkpoint as already done — it must never re-prompt or
     spuriously force FULL.
+12. **Chart tick interval / dot visibility must scale with the filtered length, not be hardcoded.**
+    Found while adding the period toggle: the original `interval={2}` was tuned for the ~150-day
+    `isleofculture` range. At 7 or 14 points that skips most day labels (2 kept out of every 3), making
+    a short period unreadable — the opposite of what the toggle is for. Fixed by deriving
+    `interval=Math.max(0,Math.ceil(data.length/15)-1)` and only showing per-point dots when
+    `data.length<=31`. Any future change to the chart must re-check this against both a short (7d) and
+    a long (150+ day) dataset, not just one.
 
 ## Why incremental is correct
 Every signal is bucketed by its **own event timestamp**, so a day, once computed, never changes —
@@ -135,6 +155,10 @@ change it (`--reconfigure`/`--full`/`--from`) force FULL, so parity is never sil
   `Detected:` plan line, the checkpoint, and the artifact footnote; deny-list servers
   (Spotify/Canva/Vercel/Supabase/…) are NOT mentioned; `--list-sources` prints the classification and
   exits without generating.
+- **Period toggle**: clicking 7d/14d/30d/All changes KPIs, chart, weekly bars and the day table
+  together (checked against `isleofculture`'s live dashboard); All reproduces the pre-toggle totals
+  exactly; 7d shows per-day dots and one x-axis label per day (not the old fixed `interval={2}`, which
+  would've skipped most of them — landmine #12); `localStorage.period` persists the choice.
 
 ## Verified evidence-source locations (this machine)
 - Claude sessions: `~/.claude/projects/<flattened-cwd>/<uuid>.jsonl`; per-line top-level `timestamp`

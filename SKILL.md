@@ -21,9 +21,10 @@ evidence, then produce three internally-consistent files:
 1. a **markdown worklog** (`.md`) — the human-readable source of truth (written **first**),
 2. a flat **`.csv`** (one row per day),
 3. an interactive **`.html`** dashboard styled with **shadcn/ui** (React + Tailwind + Recharts via
-   CDN; KPI cards, a shadcn-style gradient **area chart** for hours/day, weekly progress bars, a
-   sortable detail table with ticket badges, and a **light/dark theme toggle**) — generated **last,
-   after the `.md` exists**.
+   CDN; KPI cards, a shadcn-style gradient **area chart** for hours/day, a **7d/14d/30d/All period
+   toggle** that scopes the KPIs/chart/weekly bars/table together, weekly progress bars, a sortable
+   detail table with ticket badges, and a **light/dark theme toggle**) — generated **last, after the
+   `.md` exists**.
 
 Evidence sources: **git commits + reflog** across all clones/worktrees, **Claude Code + Codex
 session logs**, **GitHub PRs** (`gh`), and **Linear issue lifecycle** (MCP). Hours are
@@ -593,14 +594,23 @@ the head.
    (`[&_.recharts-surface]:outline-none`, `[&_.recharts-layer]:outline-none`,
    `[&_.recharts-sector]:outline-none`, `[&_.recharts-dot]:stroke-transparent`). Use a gradient
    **`AreaChart`** (`<defs><linearGradient>` from `--color` at 0.8 → 0.1 opacity; `Area type="natural"
-   stroke="var(--color-…)" fill="url(#…)" fillOpacity={0.4} dot={false}`), `CartesianGrid vertical={false}`
+   stroke="var(--color-…)" fill="url(#…)" fillOpacity={0.4}`), `CartesianGrid vertical={false}`
    + token-colored axes (`tickLine`/`axisLine` false, ticks filled `muted-foreground`), and a
    `ChartTooltipContent`-style tooltip card: `rounded-lg border border-border/50 bg-background … shadow-xl`
    with a colored `rounded-[2px]` indicator and a `font-mono … tabular-nums` value. A plain Recharts
    `<BarChart>` with the default tooltip is the tell that it's "not true shadcn."
-7. **Verify in a browser before declaring done** (Step 5): no console errors, `window.Recharts` is an
-   object, `getComputedStyle(body).backgroundColor` is white, and a `.bg-card` border-color equals the
-   token (`rgb(228, 228, 231)`), not gray-200 (`rgb(229, 231, 235)`).
+8. **Period toggle (7d/14d/30d/All) scopes the whole dashboard, and the chart must scale to it.**
+   `DATA` is one record per calendar day in chronological order, so "last N days" is just
+   `DATA.slice(-N)` — no date arithmetic. The filtered slice drives the KPIs, the chart, the weekly
+   bars, and the day table together (not just the chart). The X-axis tick `interval` and the `Area`'s
+   `dot` **must scale with the filtered length** — a fixed `interval`/`dot={false}` tuned for a long
+   range (e.g. 150+ days) skips most day labels and hides individual points on a 7- or 14-day view.
+   Persist the chosen period to `localStorage` the same way the theme choice is persisted; default to
+   `"all"` so a first load never surprises the user by hiding history.
+9. **Verify in a browser before declaring done** (Step 5): no console errors, `window.Recharts` is an
+   object, `getComputedStyle(body).backgroundColor` is white, a `.bg-card` border-color equals the
+   token (`rgb(228, 228, 231)`, not gray-200 `rgb(229, 231, 235)`), and each period button reflows the
+   chart/weekly/table/KPIs together (spot-check 7d and All).
 
 #### HTML template (verbatim except the 5 tokens)
 ````html
@@ -690,13 +700,22 @@ const Button=({variant="outline",size="icon",className,children,...p})=>{
 const SunIcon=()=><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>;
 const MoonIcon=()=><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>;
 function ThemeToggle({dark,onToggle}){return <Button aria-label="Toggle light/dark theme" title="Toggle theme" onClick={onToggle}>{dark?<SunIcon/>:<MoonIcon/>}</Button>;}
+const PERIODS=[{k:'7d',l:'7d',n:7},{k:'14d',l:'14d',n:14},{k:'30d',l:'30d',n:30},{k:'all',l:'All',n:null}];
+function PeriodToggle({period,onChange}){
+ return <div className="inline-flex items-center gap-0.5 rounded-md border border-input bg-background p-0.5">
+  {PERIODS.map(p=>
+   <button key={p.k} onClick={()=>onChange(p.k)}
+    className={cn("px-2.5 py-1 text-xs font-medium rounded-sm transition-colors",
+     period===p.k?"bg-secondary text-secondary-foreground":"text-muted-foreground hover:text-foreground")}>
+    {p.l}
+   </button>)}
+ </div>;
+}
 // helpers
 const toHM=d=>{if(d==null)return '–';let m=Math.round(d*60);return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');};
 const fmtUK=iso=>{const p=iso.split('-');return p[2]+'/'+p[1]+'/'+p[0];};
 const mondayOf=iso=>{const[y,m,dd]=iso.split('-').map(Number);const u=new Date(Date.UTC(y,m-1,dd));const off=(u.getUTCDay()+6)%7;u.setUTCDate(u.getUTCDate()-off);return u.toISOString().slice(0,10);};
 const win=d=>d.off?'—':toHM(d.start)+'–'+toHM(d.end);
-const sum=k=>DATA.reduce((a,d)=>a+(d[k]||0),0);
-const worked=DATA.filter(d=>!d.off);
 // shadcn ChartContainer: scopes --color-* vars + applies the recharts overrides
 const CHART_OVERRIDES="text-xs [&_.recharts-surface]:outline-none [&_.recharts-layer]:outline-none [&_.recharts-sector]:outline-none [&_.recharts-dot]:stroke-transparent";
 function ChartContainer({className,style,children}){
@@ -721,8 +740,12 @@ function ChartTip({active,payload}){
   </div>}
  </div>;
 }
-function HoursChart(){
- const data=DATA.map(d=>({...d,label:fmtUK(d.date).slice(0,5)}));
+function HoursChart({data:src}){
+ const data=src.map(d=>({...d,label:fmtUK(d.date).slice(0,5)}));
+ // scale to the filtered length: a fixed interval/dot tuned for a long range
+ // skips labels and hides points on a short (7d/14d) period.
+ const tickInterval=Math.max(0,Math.ceil(data.length/15)-1);
+ const showDots=data.length<=31;
  return <ChartContainer className="h-[250px]" style={{['--color-hours']:'hsl(var(--chart-1))'}}>
   <R.ResponsiveContainer width="100%" height="100%">
    <R.AreaChart data={data} margin={{top:10,right:12,left:0,bottom:0}}>
@@ -733,16 +756,16 @@ function HoursChart(){
      </linearGradient>
     </defs>
     <R.CartesianGrid vertical={false} stroke="hsl(var(--border))" strokeOpacity={0.7}/>
-    <R.XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} interval={2} tick={{fontSize:10,fill:'hsl(var(--muted-foreground))'}}/>
+    <R.XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} interval={tickInterval} tick={{fontSize:10,fill:'hsl(var(--muted-foreground))'}}/>
     <R.YAxis tickLine={false} axisLine={false} width={30} tickMargin={4} tick={{fontSize:10,fill:'hsl(var(--muted-foreground))'}} tickFormatter={v=>v+'h'}/>
     <R.Tooltip cursor={false} content={<ChartTip/>}/>
-    <R.Area dataKey="hours" type="natural" stroke="var(--color-hours)" strokeWidth={2} fill="url(#fillHours)" fillOpacity={0.4} dot={false} activeDot={{r:3,strokeWidth:0}}/>
+    <R.Area dataKey="hours" type="natural" stroke="var(--color-hours)" strokeWidth={2} fill="url(#fillHours)" fillOpacity={0.4} dot={showDots?{r:3,strokeWidth:0,fill:'var(--color-hours)'}:false} activeDot={{r:3,strokeWidth:0}}/>
    </R.AreaChart>
   </R.ResponsiveContainer>
  </ChartContainer>;
 }
-function Weeks(){
- const weeks=useMemo(()=>{const wk={};DATA.forEach(d=>{const k=mondayOf(d.date);(wk[k]=wk[k]||{key:k,h:0,c:0,days:0});wk[k].h+=d.hours;wk[k].c+=d.commits;if(!d.off)wk[k].days++;});return Object.values(wk).sort((a,b)=>a.key.localeCompare(b.key));},[]);
+function Weeks({data}){
+ const weeks=useMemo(()=>{const wk={};data.forEach(d=>{const k=mondayOf(d.date);(wk[k]=wk[k]||{key:k,h:0,c:0,days:0});wk[k].h+=d.hours;wk[k].c+=d.commits;if(!d.off)wk[k].days++;});return Object.values(wk).sort((a,b)=>a.key.localeCompare(b.key));},[data]);
  const mx=Math.max(...weeks.map(w=>w.h),1);
  const totalH=weeks.reduce((a,w)=>a+w.h,0), totalDays=weeks.reduce((a,w)=>a+w.days,0), totalC=weeks.reduce((a,w)=>a+w.c,0);
  return <div className="space-y-3">{weeks.map((w,i)=>
@@ -760,11 +783,11 @@ function Weeks(){
   </div>
  </div>;
 }
-function DayTable(){
+function DayTable({data}){
  const cols=[{k:'date',l:'Date'},{k:'dow',l:'Day'},{k:'win',l:'Worked'},{k:'hours',l:'Hours',num:1},{k:'commits',l:'Commits',num:1},{k:'sessions',l:'Sessions',num:1},{k:'what',l:'What you worked on'}];
  const [sort,setSort]=useState({k:'date',dir:1});
  const val=(d,k)=>k==='win'?(d.start??99):d[k];
- const rows=useMemo(()=>[...DATA].sort((a,b)=>{let x=val(a,sort.k),y=val(b,sort.k);if(typeof x==='string')return sort.dir*x.localeCompare(y);return sort.dir*((x||0)-(y||0));}),[sort]);
+ const rows=useMemo(()=>[...data].sort((a,b)=>{let x=val(a,sort.k),y=val(b,sort.k);if(typeof x==='string')return sort.dir*x.localeCompare(y);return sort.dir*((x||0)-(y||0));}),[sort,data]);
  const click=k=>setSort(s=>s.k===k?{k,dir:-s.dir}:{k,dir:1});
  return <Table><THead><TR className="hover:bg-transparent">{cols.map(c=>
    <TH key={c.k} className={cn("cursor-pointer",c.num&&"text-right",c.k==='win'&&"w-28")} onClick={()=>click(c.k)}>{c.l}{sort.k===c.k?(sort.dir>0?' ↑':' ↓'):''}</TH>)}</TR></THead>
@@ -781,7 +804,13 @@ function Kpi({label,value}){return <Card><CardHeader className="pb-2"><CardDescr
 function App(){
  const [dark,setDark]=useState(()=>document.documentElement.classList.contains('dark'));
  const toggle=()=>setDark(v=>{const nv=!v;document.documentElement.classList.toggle('dark',nv);try{localStorage.setItem('theme',nv?'dark':'light');}catch(e){}return nv;});
- const kpis=[['Days active',worked.length+' of '+DATA.length],['Total hours','~'+Math.round(sum('hours'))+'h'],['Commits',sum('commits')],['PRs merged',sum('pr_m')]];
+ const [period,setPeriod]=useState(()=>{try{return localStorage.getItem('period')||'all';}catch(e){return 'all';}});
+ const setPeriodPersist=p=>{setPeriod(p);try{localStorage.setItem('period',p);}catch(e){}};
+ const filtered=useMemo(()=>{const p=PERIODS.find(x=>x.k===period);return(!p||p.n==null||p.n>=DATA.length)?DATA:DATA.slice(-p.n);},[period]);
+ const filteredWorked=filtered.filter(d=>!d.off);
+ const fsum=k=>filtered.reduce((a,d)=>a+(d[k]||0),0);
+ const kpis=[['Days active',filteredWorked.length+' of '+filtered.length],['Total hours','~'+Math.round(fsum('hours'))+'h'],['Commits',fsum('commits')],['PRs merged',fsum('pr_m')]];
+ const rangeLabel=(!filtered.length||filtered.length===DATA.length)?DATE_RANGE:(fmtUK(filtered[0].date)+' – '+fmtUK(filtered[filtered.length-1].date)+'.');
  return <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
   <div className="flex items-start justify-between gap-4">
    <div className="space-y-1">
@@ -794,9 +823,9 @@ function App(){
    <ThemeToggle dark={dark} onToggle={toggle}/>
   </div>
   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{kpis.map(k=><Kpi key={k[0]} label={k[0]} value={k[1]}/>)}</div>
-  <Card><CardHeader className="pb-2"><CardTitle className="text-base">Hours per day</CardTitle><CardDescription>{DATE_RANGE} Hover the area for a day's detail.</CardDescription></CardHeader><CardContent><HoursChart/></CardContent></Card>
-  <Card><CardHeader className="pb-2"><CardTitle className="text-base">By week</CardTitle></CardHeader><CardContent><Weeks/></CardContent></Card>
-  <Card><CardHeader className="pb-2"><CardTitle className="text-base">Every day</CardTitle><CardDescription>Click a column header to sort.</CardDescription></CardHeader><CardContent><DayTable/></CardContent></Card>
+  <Card><CardHeader className="pb-2"><div className="flex items-center justify-between gap-4"><div><CardTitle className="text-base">Hours per day</CardTitle><CardDescription>{rangeLabel} Hover the area for a day's detail.</CardDescription></div><PeriodToggle period={period} onChange={setPeriodPersist}/></div></CardHeader><CardContent><HoursChart data={filtered}/></CardContent></Card>
+  <Card><CardHeader className="pb-2"><CardTitle className="text-base">By week</CardTitle></CardHeader><CardContent><Weeks data={filtered}/></CardContent></Card>
+  <Card><CardHeader className="pb-2"><CardTitle className="text-base">Every day</CardTitle><CardDescription>Click a column header to sort.</CardDescription></CardHeader><CardContent><DayTable data={filtered}/></CardContent></Card>
   <p className="text-xs text-muted-foreground">{FOOTNOTE}</p>
  </div>;
 }
@@ -827,6 +856,10 @@ the rendered files if a step fails.
   confirm `<html>` gains/loses `dark`, the body bg flips (light `rgb(255,255,255)` ↔ dark
   `rgb(9,9,11)`), and the choice persists to `localStorage.theme`. If the page is unstyled or the
   chart is missing, the CDN scripts were blocked — say so rather than shipping a broken file.
+- **Period toggle:** click **7d**, confirm the KPI numbers, the chart's x-axis point count, the
+  weekly bars, and the day table row count all shrink together (not just the chart); the chart shows
+  per-day dots at 7d (hidden again at "All" for a long range); switching back to **All** restores the
+  original totals exactly. Confirm `localStorage.period` updates.
 - **UPDATE-mode checks:** the state file exists and its `covered_through` is now; days before
   `window_start` are byte-identical to the prior run (only the trailing edge changed); the merged
   record count = one per day from `from` to today (no gaps, no dupes). **Parity:** an UPDATE result
