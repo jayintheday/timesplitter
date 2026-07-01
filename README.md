@@ -1,4 +1,4 @@
-# time-splitters
+# timesplitter
 
 A Claude Code skill that **forensically reconstructs a personal work log** from local evidence —
 git commits + reflog across all your clones/worktrees, Claude Code + Codex session logs, GitHub
@@ -34,11 +34,10 @@ decisions and landmines behind it — useful if you're extending the skill, not 
 
 ## Install
 
-**Claude Code** — clone into your skills directory. Note: this skill is invoked as
-`/timesplitter`, not `/time-splitters`, so the local folder name should match the invocation:
+**Claude Code** — clone into your skills directory:
 
 ```bash
-git clone https://github.com/jayintheday/time-splitters ~/.claude/skills/timesplitter
+git clone https://github.com/jayintheday/timesplitter ~/.claude/skills/timesplitter
 ```
 
 Then invoke it with `/timesplitter`, or just ask Claude to "reconstruct my hours" or "build my

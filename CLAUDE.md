@@ -178,9 +178,10 @@ change it (`--reconfigure`/`--full`/`--from`) force FULL, so parity is never sil
   to match the repo's dev-folder name but not the invocation command. Symlinked into
   `~/.claude/skills/timesplitter` → `~/Desktop/skill development/time-splitters` (the dev folder itself
   keeps its original name; only the symlink's name is the trigger).
-- Pushed to `github.com/jayintheday/time-splitters` (public), mirroring the sibling `dashkit` repo's
-  layout (README + MIT LICENSE + `.gitignore`). The runtime test harness lived in the session
-  scratchpad (ephemeral) — not committed here by design.
+- Pushed to `github.com/jayintheday/timesplitter` (public) — named to match the invocation, not the
+  local dev-folder name (an earlier pass wrongly used `time-splitters` for the GitHub repo too; it
+  was renamed). Mirrors the sibling `dashkit` repo's layout (README + MIT LICENSE + `.gitignore`).
+  The runtime test harness lived in the session scratchpad (ephemeral) — not committed here by design.
 
 ## Known limitations / possible next steps
 - The HTML needs network at first open (CDN). The offline-capable option is the "real shadcn project"
